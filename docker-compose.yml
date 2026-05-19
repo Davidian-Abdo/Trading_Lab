@@ -44,6 +44,8 @@ services:
       - WORKER_AUTOSTART=true
       - EMBED_WORKERS=1
       - CRYPTO_EXCHANGE=binance
+      - HOME=/app                                  # <-- add: writable home (chowned to lab)
+      - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
     env_file: ./.env.shared        # all feed credentials + optional
                                    # DASHBOARD_PASSWORD live here
     restart: always
