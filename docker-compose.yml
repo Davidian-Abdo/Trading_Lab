@@ -1,0 +1,61 @@
+# Single-service deployment. The dashboard process auto-spawns one
+# worker thread per asset (see core/worker_runner.py), so there is no
+# need for separate worker containers and nothing has to be started
+# from a terminal. `docker compose up -d --build` brings up the whole
+# lab; the UI controls everything from there.
+#
+# If you want the legacy multi-container layout (one container per
+# asset worker + one for the dashboard), set EMBED_WORKERS=0 below and
+# add per-asset worker services with `command: python -m bots.worker`.
+# That mode is for advanced/distributed deployments only; the default
+# below is the supported path.
+#
+# Production notes:
+#   - .env.shared (NOT the .example) is loaded by the service. Copy
+#     .env.shared.example -> .env.shared on the VPS, paste credentials,
+#     keep it out of git (already in .gitignore-style intent).
+#   - The dashboard binds to 127.0.0.1 by default. Reach it via
+#     `ssh -L 8501:localhost:8501 user@vps`, OR change the ports line
+#     to "8501:8501" AFTER setting DASHBOARD_PASSWORD and firewalling
+#     the port to your office IP.
+#   - Logs are rotated so a wedged worker thread can't fill the disk.
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  lab:
+    build: .
+    command: >
+      streamlit run dashboard.py
+      --server.port 8501
+      --server.address 0.0.0.0
+      --server.headless true
+    environment:
+      - DB_PATH=data/results.db
+      - MIN_TRADES=20
+      - WORKER_STALE_SECONDS=600
+      - START_EQUITY=10000
+      - ALLOC_FRACTION=0.5
+      - POLL_SECONDS=60
+      - WORKER_AUTOSTART=true
+      - EMBED_WORKERS=1
+      - CRYPTO_EXCHANGE=binance
+    env_file: ./.env.shared        # all feed credentials + optional
+                                   # DASHBOARD_PASSWORD live here
+    restart: always
+    volumes: ["./data:/app/data"]
+    # bind to loopback ONLY by default — use SSH tunnel from your laptop.
+    # To expose publicly, set DASHBOARD_PASSWORD AND change to "8501:8501"
+    # AND firewall the port to your IP.
+    ports: ["127.0.0.1:8501:8501"]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8501/_stcore/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    logging: *default-logging
