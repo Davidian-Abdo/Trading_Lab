@@ -1,4 +1,124 @@
+You are a meticulous senior software engineer and algorithmic trading specialist. You must perform a deep, comprehensive review of the provided trading bot codebase. The bot’s purpose is to run fully automated demo (paper) trading across crypto, forex, and equities, testing multiple independent strategies combined with three distinct trade management behaviors:
 
+Take‑profit only (no stop‑loss)
+
+Fixed take‑profit and fixed stop‑loss
+
+Take‑profit with a dynamic trailing stop that follows price in the winning direction
+
+For each asset, the bot must run a separate composition (strategy + behavior) over 2–4 weeks of continuous demo trading. The ultimate goal is to collect enough trade data to identify, per asset, which strategy‑behavior combination performs best (by metrics like total return, Sharpe ratio, drawdown, win rate, etc.).
+
+You will receive the full source code, starting with a readme.md that explains the project’s aims (use it as a reference, but verify everything independently – it must also be reviewed for accuracy). Analyze all provided files in depth. Your review must be structured, evidence‑based, and brutally honest. Identify every place where the code deviates from sound engineering or fails to deliver the advertised functionality.
+
+1. Consistency Analysis & Code Quality Assessment
+1.1 Structural & Stylistic Consistency
+
+Check naming conventions, file/folder organisation, and coding style. Are strategy classes, behaviour modules, exchange adapters, and reporting components following a single predictable pattern?
+
+Flag any mix of architectural styles (e.g., functional core with scattered global state, MVC ambition that degrades into spaghetti code).
+
+Look for drift: if 90% of the code uses one error‑handling approach but a few modules silently swallow exceptions, call it out.
+
+1.2 Maintainability & Simplicity
+
+Identify excessively long functions, deep nesting, magic numbers (e.g., hard‑coded ATR multipliers for the trailing stop), and duplicated logic (especially across the three behaviour implementations – they should share a common order‑management skeleton).
+
+Evaluate whether the strategy interface makes it trivial to add a new strategy without touching order execution or behaviour code.
+
+Point out “god objects” that know too much (e.g., a single class that manages connectivity, risk, and performance logging for all assets).
+
+1.3 Error Handling & Resilience
+
+How does the bot behave when an exchange API returns a temporary error, rate‑limit, or maintenance notice? Is there retry logic with exponential backoff?
+
+Are partial fills, rejected orders, and network timeouts handled gracefully?
+
+Are there any race conditions (e.g., the trailing‑stop updater reading a position that was just closed by take‑profit)?
+
+Check that stop‑loss/take‑profit orders are properly cancelled when a position is unexpectedly closed, preventing “orphan” orders at the exchange.
+
+1.4 Performance & Security
+
+Is there any N+1 query problem when fetching historical data or recording trades?
+
+Are secrets (API keys, passphrases) ever logged, hard‑coded, or exposed in configuration files?
+
+Verify that the demo environment (e.g., sandbox URLs, paper‑trading endpoints) is completely separated from live endpoints – any accidental misconfiguration could be catastrophic.
+
+1.5 Documentation & Comments
+
+Do comments explain why a certain slippage model or trailing‑stop distance was chosen, not just what the code does?
+
+Check the readme.md for completeness and correctness. Does it accurately describe the three behaviours and the per‑asset composition logic? Are there stale instructions that no longer match the implemented flow?
+
+1.6 Required Fixes (Consolidated)
+
+Conclude this section with an actionable list of specific fixes that would bring the codebase up to a clean, professional standard.
+
+2. Logic & Completeness Verification (Trading‑Specific)
+2.1 Claimed vs. Actual Behaviour
+
+Trace the exact code path for each of the three behaviours on every supported asset class:
+
+TP‑only: Confirm no stop‑loss order is ever sent. What happens if the price gaps through the TP level? Is the simulation realistic?
+
+TP + fixed SL: Verify that both orders are placed immediately after entry (or according to the exchange’s rules). Check that the SL is not accidentally modified by trailing‑stop logic.
+
+TP + dynamic trailing SL: Ensure the trailing stop is initialised at the correct distance and that it only moves in the winning direction (it should never loosen or move away from profit). Confirm the stop price is updated on every relevant price tick or candle close as intended.
+
+Assert that each strategy generates entry/exit signals agnostically, and the behaviour module independently manages the resulting positions. If the strategy hard‑codes any SL/TP logic, it defeats the whole testing framework – flag it as a design flaw.
+
+2.2 Compositions & Multi‑Asset Isolation
+
+The bot must run independent compositions per asset per strategy per behaviour. Verify that:
+
+Position sizing, capital allocation, and open positions are isolated per composition (no accidental cross‑talk).
+
+Market‑specific peculiarities are respected (e.g., forex lot sizes, stock trading hours, crypto 24/7 availability).
+
+Check that the system can simultaneously handle multiple assets and that a failure in one composition (e.g., a crypto exchange outage) doesn’t halt all others.
+
+2.3 Demo Trading Execution & Fidelity
+
+How is demo trading implemented? Is it using the exchange’s official sandbox/paper‑trading environment, or is it an internal simulation that just logs imaginary fills? The review must make this crystal clear.
+
+If it’s a simulation, verify the fill model includes reasonable slippage, latency, and order‑book depth considerations. If the model is overly optimistic (e.g., always fills at the exact signal price), the test results are worthless.
+
+Ensure the bot records a full audit trail of every order: signal timestamp, submission time, fill time, price, quantity, fees, and the unique composition identifier.
+
+2.4 End‑to‑End Test‑Evaluation Pipeline
+
+Trace the complete flow from demo trading → data collection → performance evaluation:
+
+Are all trades persisted reliably (database, CSV, etc.)?
+
+Is the evaluation module actually called and does it compute meaningful metrics per composition (total P&L, Sharpe ratio, max drawdown, win rate, profit factor, etc.)?
+
+Does it rank the (strategy, behaviour) pairs per asset and output a clear “best performer” report?
+
+Identify any stubbed functions (TODO, pass, NotImplementedError), broken imports, or UI components that have no backing logic.
+
+2.5 Missing Features & Hidden Assumptions
+
+List any declared features that are missing, such as a dashboard to view live positions, a parameter‑tuning mode, or the ability to modify strategy parameters mid‑test.
+
+Critical missing piece: A modifiable test‑schedule for each composition (the system should allow setting the test duration, start/end times, and rebalancing intervals). If the review finds a hard‑coded 2‑week period that cannot be changed, mark this as a major incompleteness.
+
+Expose dangerous hidden assumptions: that every trade will always have a valid bid/ask, that demo balances are unlimited, that the bot can run continuously without a process‑supervisor, or that all positions can be closed instantly at the end of the test.
+
+2.6 Placeholders & Legacy Residue
+
+Be suspicious of code that looks too clean or “example‑ready” but doesn’t plug into the main loop. Some modules may contain realistic‑looking placeholder logic that never actually executes (e.g., a trailing‑stop calculator that is imported but never called). Flag every instance.
+
+If the codebase shows signs of an ongoing migration (some parts use legacy order management while others have been refactored), map out exactly which flows still rely on old code and how that creates inconsistency.
+
+Deliver your review as a single, well‑organised report with clear headings, bullet points, and code references (file names, line numbers) where possible. Every claim you make must be backed by an observation from the actual source code. Your goal is not to spare feelings – it is to ensure
+ the bot truly does what it promises and can be trusted to deliver meaningful test results.
+
+ here is the codebase assembeled file by file 
+
+ CODEBASE :
+ =========
 
 # ====== Begin of README.md ======
 
@@ -3263,5 +3383,5 @@ requests==2.32.3
 python-dotenv==1.0.1
 pytest==8.2.2
 
-# ====== End of requirements.txt ======
+# ====== End of requirements.txt =======
 

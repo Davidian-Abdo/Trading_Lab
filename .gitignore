@@ -1,5 +1,8 @@
 .env.shared
 .env
+assembled_code1.txt
+copy_files.py
+review_prompt.txt
 data/
 *.db
 *.db-wal
