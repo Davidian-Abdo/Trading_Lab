@@ -1,11 +1,18 @@
 """
 core/config.py
 
-v2 runs ONE worker process per asset class. Each worker runs the whole
-(symbol x strategy x behavior) matrix for its asset against a single
-shared data feed. This keeps the whole lab to ~3 tiny processes, so a
-$5 VPS handles dozens of combinations easily and there are no broker
-rate-limit storms.
+v2 runs ONE worker process/thread per asset class. Each worker runs the
+whole (symbol x strategy x behavior) matrix for its asset against a
+single shared data feed.
+
+Broker switch:
+  - crypto  -> Kraken spot (CCXT, public data; keys optional)
+  - forex   -> Interactive Brokers PAPER (via IB Gateway/TWS)
+  - stocks  -> Interactive Brokers PAPER (via IB Gateway/TWS)
+
+IMPORTANT: stocks and forex share ONE IB Gateway but run as separate
+workers, so they MUST use different IB clientIds. The per-asset client
+id is resolved here from IB_CLIENT_ID_STOCKS / IB_CLIENT_ID_FOREX.
 
 Config is per-worker, from environment variables.
 """
@@ -23,8 +30,8 @@ def _req(k: str) -> str:
 
 
 def _parse_symbols(raw: str) -> List[str]:
-    """Split a comma- or whitespace-separated symbol list, trimmed + deduped
-    while preserving order."""
+    """Split a comma- or whitespace-separated symbol list, trimmed +
+    deduped while preserving order."""
     if not raw:
         return []
     parts = [p.strip() for chunk in raw.split(",") for p in chunk.split()]
@@ -45,14 +52,21 @@ class WorkerConfig:
     alloc_fraction: float = 0.5
     poll_seconds: int = 60
 
-    # feed credentials (only the ones for this asset are needed)
-    crypto_exchange: str = "binance"          # hardwired to Binance testnet
-    binance_testnet_key: str = ""             # required when asset=crypto
-    binance_testnet_secret: str = ""          # required when asset=crypto
-    oanda_token: str = ""
-    oanda_account: str = ""
-    alpaca_key: str = ""
-    alpaca_secret: str = ""
+    # ---- crypto: Kraken (public data; keys OPTIONAL) ----------------
+    crypto_exchange: str = "kraken"           # hardwired to Kraken
+    kraken_key: str = ""                      # optional (raises rate limits)
+    kraken_secret: str = ""                   # optional
+
+    # ---- forex + stocks: Interactive Brokers PAPER ------------------
+    # Connect to a running IB Gateway / TWS. clientId is resolved
+    # PER ASSET (stocks vs forex) so the two workers don't collide.
+    ib_host: str = "127.0.0.1"
+    ib_port: int = 4002                       # 4002=Gateway paper,
+                                              # 7497=TWS paper
+    ib_client_id: int = 11                    # set per-asset below
+    ib_account: str = ""                      # optional paper acct id
+    ib_market_data_type: int = 3              # 3=delayed,4=delayed-frozen,
+                                              # 1=live (needs subscription)
 
     db_path: str = "data/results.db"
     tg_token: str = ""
@@ -60,12 +74,18 @@ class WorkerConfig:
     heartbeat_url: str = ""
 
 
+def _ib_client_id_for(asset: str) -> int:
+    """Distinct IB clientId per asset so stocks + forex workers can both
+    connect to the same IB Gateway concurrently."""
+    cid_stocks = int(os.environ.get("IB_CLIENT_ID_STOCKS", "11"))
+    cid_forex = int(os.environ.get("IB_CLIENT_ID_FOREX", "12"))
+    return cid_forex if asset == "forex" else cid_stocks
+
+
 def load_worker_config_for(asset: str) -> WorkerConfig:
     """Build a WorkerConfig for a SPECIFIC asset, ignoring the ASSET env
     var. Used by the in-dashboard worker runner that spawns one thread
-    per asset from a single process. Env-var SYMBOLS is honored ONLY when
-    a single asset is being run via the standalone entrypoint — when the
-    dashboard runs everything, symbol selection is per-asset in the DB."""
+    per asset from a single process."""
     asset = asset.strip().lower()
     if asset not in ("crypto", "forex", "stocks"):
         raise RuntimeError("asset must be crypto|forex|stocks")
@@ -75,13 +95,15 @@ def load_worker_config_for(asset: str) -> WorkerConfig:
         start_equity=float(os.environ.get("START_EQUITY", "10000")),
         alloc_fraction=float(os.environ.get("ALLOC_FRACTION", "0.5")),
         poll_seconds=int(os.environ.get("POLL_SECONDS", "60")),
-        crypto_exchange=os.environ.get("CRYPTO_EXCHANGE", "binance"),
-        binance_testnet_key=os.environ.get("BINANCE_TESTNET_KEY", ""),
-        binance_testnet_secret=os.environ.get("BINANCE_TESTNET_SECRET", ""),
-        oanda_token=os.environ.get("OANDA_TOKEN", ""),
-        oanda_account=os.environ.get("OANDA_ACCOUNT", ""),
-        alpaca_key=os.environ.get("ALPACA_KEY", ""),
-        alpaca_secret=os.environ.get("ALPACA_SECRET", ""),
+        crypto_exchange=os.environ.get("CRYPTO_EXCHANGE", "kraken"),
+        kraken_key=os.environ.get("KRAKEN_KEY", ""),
+        kraken_secret=os.environ.get("KRAKEN_SECRET", ""),
+        ib_host=os.environ.get("IB_HOST", "127.0.0.1"),
+        ib_port=int(os.environ.get("IB_PORT", "4002")),
+        ib_client_id=_ib_client_id_for(asset),
+        ib_account=os.environ.get("IB_ACCOUNT", ""),
+        ib_market_data_type=int(os.environ.get("IB_MARKET_DATA_TYPE",
+                                               "3")),
         db_path=os.environ.get("DB_PATH", "data/results.db"),
         tg_token=os.environ.get("TG_TOKEN", ""),
         tg_chat=os.environ.get("TG_CHAT", ""),
@@ -95,8 +117,6 @@ def load_worker_config() -> WorkerConfig:
         raise RuntimeError("ASSET must be crypto|forex|stocks")
 
     # SYMBOLS (plural) wins. SYMBOL (singular, legacy) is also accepted.
-    # When set, it pins this standalone worker to a fixed symbol list and
-    # bypasses the dashboard's per-asset checkbox selection.
     symbols = _parse_symbols(os.environ.get("SYMBOLS", ""))
     if not symbols:
         symbols = _parse_symbols(os.environ.get("SYMBOL", ""))

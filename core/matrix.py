@@ -81,11 +81,13 @@ BEHAVIORS = {
 # a lot by market and DELIBERATELY affect who wins; tune them honestly.
 ASSETS = {
     "crypto": {
+        # Kraken spot pairs (verify any new ticker on kraken.com first).
         "available_symbols": ["BTC/USDT", "ETH/USDT", "SOL/USDT",
-                              "BNB/USDT", "XRP/USDT", "ADA/USDT",
+                              "DOT/USDT", "XRP/USDT", "ADA/USDT",
                               "DOGE/USDT", "LTC/USDT"],
-        "cost_bps": 12.0,
+        "cost_bps": 16.0,   # Kraken taker fees/spread run a bit higher
     },
+   
     "forex": {
         "available_symbols": ["EUR_USD", "GBP_USD", "USD_JPY",
                               "AUD_USD", "USD_CAD", "USD_CHF",

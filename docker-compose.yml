@@ -34,6 +34,8 @@ services:
       --server.port 8501
       --server.address 0.0.0.0
       --server.headless true
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       - DB_PATH=data/results.db
       - MIN_TRADES=20
@@ -43,7 +45,16 @@ services:
       - POLL_SECONDS=60
       - WORKER_AUTOSTART=true
       - EMBED_WORKERS=1
-      - CRYPTO_EXCHANGE=binance
+      - CRYPTO_EXCHANGE=kraken
+      - IB_HOST=host.docker.internal
+      - IB_PORT=4002
+      - IB_CLIENT_ID_STOCKS=11
+      - IB_CLIENT_ID_FOREX=12
+      - IB_MARKET_DATA_TYPE=3
+      - IB_CACHE_TTL=120
+      # Recommended: IB historical-data pacing is ~60 req / 10 min.
+      # 60s polling across many symbols/timeframes will trip it.
+      - POLL_SECONDS=300
       - HOME=/app                                  # <-- add: writable home (chowned to lab)
       - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
     env_file: ./.env.shared        # all feed credentials + optional

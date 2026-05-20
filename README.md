@@ -108,33 +108,26 @@ core/worker.py	One per asset: fetch all symbols once → each combo scans → lo
 core/results.py	Shared SQLite, every row tagged (asset, symbol, strategy, behavior)
 dashboard.py	Per-asset pivot + live positions table + "does the stop-loss help?"
 selftest.py	Offline matrix test — run first
-3. Accounts you need
-Sign-up screens change; these are the concepts. All three asset
-classes run on official DEMO/PAPER environments — no real money is
-ever at risk. Create keys with no withdrawal permission. Check each
-provider's current docs if a screen differs.
 
-Crypto (Binance Spot Testnet — DEMO account):
-  - Go to https://testnet.binance.vision and log in with GitHub
-    (the only auth method the testnet supports).
-  - Click "Generate HMAC_SHA256 Key", give it a label, and copy the
-    API Key and Secret Key — the Secret is shown ONCE.
-  - The testnet seeds your account with virtual balances of BTC,
-    USDT, BNB, etc. You can place real (demo) orders against the
-    live testnet matching engine. The lab uses these credentials
-    for live market data; fills stay simulated per-combo for clean
-    P&L attribution.
-Forex (OANDA practice): register a free demo/practice account,
-then in account settings → API generate a personal access token, and
-note your Account ID (looks like 101-001-1234567-001). These are
-used for data only.
-Stocks (Alpaca paper): sign up free, switch to Paper Trading,
-generate paper API key + secret (used for data only).
-Optional — Telegram alerts: message @BotFather, /newbot, copy the
-token; message your bot, then open
-https://api.telegram.org/bot<TOKEN>/getUpdates to read your chat id.
-Put the Binance Testnet / OANDA / Alpaca / Telegram values into
-.env.shared. ALL THREE asset feeds now require credentials.
+3. Accounts you need
+Crypto (Kraken — data only): no account required. Kraken's spot
+OHLCV/ticker endpoints are public and the lab simulates fills
+per-combo, so no orders are ever sent. Optionally create a read-only
+API key/secret (KRAKEN_KEY/KRAKEN_SECRET) only to raise rate
+limits. Kraken has no public spot testnet — the lab uses live
+public data on purpose; that is the price stream you'd later promote a
+winner to.
+Forex + Stocks (Interactive Brokers paper — data only): open a
+free IBKR account and enable the paper account. Install IB
+Gateway (lighter than TWS) and log it into the paper account.
+In Gateway: Configure → API → Settings → enable socket clients, note
+the port (4002 for Gateway paper), and trust the workers' client IDs.
+For unattended 24/7 operation use IBC to auto-launch and
+auto-login Gateway (it logs out daily otherwise). The lab connects
+read-only and never places orders.
+Put KRAKEN_* (optional) and the IB_* values into .env.shared.
+Forex and stocks share one Gateway but use different client IDs
+(IB_CLIENT_ID_FOREX ≠ IB_CLIENT_ID_STOCKS).
 
 4. Run locally first (do not skip)
 

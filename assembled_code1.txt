@@ -112,33 +112,26 @@ core/worker.py	One per asset: fetch all symbols once → each combo scans → lo
 core/results.py	Shared SQLite, every row tagged (asset, symbol, strategy, behavior)
 dashboard.py	Per-asset pivot + live positions table + "does the stop-loss help?"
 selftest.py	Offline matrix test — run first
-3. Accounts you need
-Sign-up screens change; these are the concepts. All three asset
-classes run on official DEMO/PAPER environments — no real money is
-ever at risk. Create keys with no withdrawal permission. Check each
-provider's current docs if a screen differs.
 
-Crypto (Binance Spot Testnet — DEMO account):
-  - Go to https://testnet.binance.vision and log in with GitHub
-    (the only auth method the testnet supports).
-  - Click "Generate HMAC_SHA256 Key", give it a label, and copy the
-    API Key and Secret Key — the Secret is shown ONCE.
-  - The testnet seeds your account with virtual balances of BTC,
-    USDT, BNB, etc. You can place real (demo) orders against the
-    live testnet matching engine. The lab uses these credentials
-    for live market data; fills stay simulated per-combo for clean
-    P&L attribution.
-Forex (OANDA practice): register a free demo/practice account,
-then in account settings → API generate a personal access token, and
-note your Account ID (looks like 101-001-1234567-001). These are
-used for data only.
-Stocks (Alpaca paper): sign up free, switch to Paper Trading,
-generate paper API key + secret (used for data only).
-Optional — Telegram alerts: message @BotFather, /newbot, copy the
-token; message your bot, then open
-https://api.telegram.org/bot<TOKEN>/getUpdates to read your chat id.
-Put the Binance Testnet / OANDA / Alpaca / Telegram values into
-.env.shared. ALL THREE asset feeds now require credentials.
+3. Accounts you need
+Crypto (Kraken — data only): no account required. Kraken's spot
+OHLCV/ticker endpoints are public and the lab simulates fills
+per-combo, so no orders are ever sent. Optionally create a read-only
+API key/secret (KRAKEN_KEY/KRAKEN_SECRET) only to raise rate
+limits. Kraken has no public spot testnet — the lab uses live
+public data on purpose; that is the price stream you'd later promote a
+winner to.
+Forex + Stocks (Interactive Brokers paper — data only): open a
+free IBKR account and enable the paper account. Install IB
+Gateway (lighter than TWS) and log it into the paper account.
+In Gateway: Configure → API → Settings → enable socket clients, note
+the port (4002 for Gateway paper), and trust the workers' client IDs.
+For unattended 24/7 operation use IBC to auto-launch and
+auto-login Gateway (it logs out daily otherwise). The lab connects
+read-only and never places orders.
+Put KRAKEN_* (optional) and the IB_* values into .env.shared.
+Forex and stocks share one Gateway but use different client IDs
+(IB_CLIENT_ID_FOREX ≠ IB_CLIENT_ID_STOCKS).
 
 4. Run locally first (do not skip)
 
@@ -247,7 +240,7 @@ the IPv4 address. Then on your LAPTOP:
   rsync --archive --chown=lab:lab ~/.ssh /home/lab/
 
   # firewall: only SSH from the internet
-  apt-get update && apt-get install -y ufw
+  apt-get update && apt-get install -y ufw git curl sqlite3
   ufw allow OpenSSH
   ufw --force enable
 
@@ -259,22 +252,52 @@ the IPv4 address. Then on your LAPTOP:
   exit
   ssh lab@VPS_IP
 
-# 5.3 Copy the project up (WITHOUT secrets, WITHOUT local data)
-On your LAPTOP, from the project root:
+# 5.3 Put the project on GitHub
+On your laptop, create a private GitHub repository. This folder currently
+does not need secrets or local data in git; `.gitignore` already excludes
+`.env.shared`, `data/`, local virtualenvs, and SQLite files.
+
+  git init
+  git add .
+  git commit -m "Initial trading lab deploy"
+  git branch -M main
+  git remote add origin git@github.com:YOUR_USER/trading-lab.git
+  git push -u origin main
+
+If you prefer the GitHub web UI, create the empty private repo there first,
+then use the `git remote add` / `git push` commands above.
+
+# 5.4 Clone from GitHub on the VPS
+Create a read-only deploy key on the VPS:
+
+  ssh lab@VPS_IP
+  ssh-keygen -t ed25519 -C "trading-lab-vps" -f ~/.ssh/trading_lab_deploy
+  cat ~/.ssh/trading_lab_deploy.pub
+  printf "Host github.com\n  IdentityFile ~/.ssh/trading_lab_deploy\n  IdentitiesOnly yes\n" >> ~/.ssh/config
+  chmod 600 ~/.ssh/config
+
+In GitHub: repository Settings -> Deploy keys -> Add deploy key. Paste the
+public key, leave "Allow write access" unchecked.
+
+Then on the VPS:
+
+  git clone git@github.com:YOUR_USER/trading-lab.git /home/lab/trading-lab
+
+Fallback without GitHub, from your laptop:
 
   rsync -av \
-    --exclude .venv --exclude Lab_venv --exclude __pycache__ \
+    --exclude .git --exclude .venv --exclude Lab_venv --exclude __pycache__ \
     --exclude data --exclude .env.shared \
     ./ lab@VPS_IP:/home/lab/trading-lab/
 
-# 5.4 Configure secrets on the SERVER (not in git)
+# 5.5 Configure secrets on the SERVER (not in git)
   ssh lab@VPS_IP
   cd /home/lab/trading-lab
   cp .env.shared.example .env.shared
   nano .env.shared           # paste OANDA / Alpaca / Telegram / heartbeat
                              # set DASHBOARD_PASSWORD to something strong
 
-# 5.5 Bring the lab up
+# 5.6 Bring the lab up
   docker compose up -d --build
   docker compose ps          # single `lab` service should be "healthy"
   docker compose logs -f lab # streams dashboard + every worker thread
@@ -284,7 +307,7 @@ On your LAPTOP, from the project root:
   # thread can never fill the disk. The lab is ONE container that runs
   # streamlit + 3 worker threads in-process.
 
-# 5.6 Reach the dashboard SAFELY
+# 5.7 Reach the dashboard SAFELY
 The compose file binds Streamlit to 127.0.0.1 ONLY on the VPS — it is
 NOT reachable from the public internet. From your laptop:
 
@@ -298,7 +321,7 @@ If you really want public access (e.g. team review), do all THREE of:
   3. ufw allow from YOUR_OFFICE_IP to any port 8501
      (never `ufw allow 8501` unrestricted — that is the public internet).
 
-# 5.7 Operate
+# 5.8 Operate
   docker compose ps                          # lab service health
   docker compose logs -f lab                 # tail dashboard + workers
   docker compose restart lab                 # restart the whole thing
@@ -306,13 +329,19 @@ If you really want public access (e.g. team review), do all THREE of:
   docker compose up -d --build               # rebuild after code changes
   docker system prune -f                     # reclaim old images
 
+To deploy a new GitHub commit:
+
+  cd /home/lab/trading-lab
+  git pull --ff-only
+  docker compose up -d --build
+
 For the day-to-day operating switch, leave Docker Compose running and use
 the dashboard toggles. The single `lab` container stays supervised by
 Docker; SQLite stores the desired run/pause state and the per-asset
 symbol selections so they survive dashboard refreshes and container
 restarts.
 
-# 5.8 Backups (tiny but worth doing)
+# 5.9 Backups (tiny but worth doing)
 SQLite is the only stateful thing. Cron-snapshot it nightly:
   echo "0 3 * * * sqlite3 /home/lab/trading-lab/data/results.db \".backup /home/lab/results-\$(date +\\%F).db\" && find /home/lab -name 'results-*.db' -mtime +14 -delete" | crontab -
 
@@ -401,6 +430,7 @@ trading-lab/
 Demo simulation only. Build the comparison discipline before you ever
 risk a real cent.
 
+
 # ====== End of README.md ======
 
 
@@ -418,11 +448,18 @@ risk a real cent.
 """
 core/config.py
 
-v2 runs ONE worker process per asset class. Each worker runs the whole
-(symbol x strategy x behavior) matrix for its asset against a single
-shared data feed. This keeps the whole lab to ~3 tiny processes, so a
-$5 VPS handles dozens of combinations easily and there are no broker
-rate-limit storms.
+v2 runs ONE worker process/thread per asset class. Each worker runs the
+whole (symbol x strategy x behavior) matrix for its asset against a
+single shared data feed.
+
+Broker switch:
+  - crypto  -> Kraken spot (CCXT, public data; keys optional)
+  - forex   -> Interactive Brokers PAPER (via IB Gateway/TWS)
+  - stocks  -> Interactive Brokers PAPER (via IB Gateway/TWS)
+
+IMPORTANT: stocks and forex share ONE IB Gateway but run as separate
+workers, so they MUST use different IB clientIds. The per-asset client
+id is resolved here from IB_CLIENT_ID_STOCKS / IB_CLIENT_ID_FOREX.
 
 Config is per-worker, from environment variables.
 """
@@ -440,8 +477,8 @@ def _req(k: str) -> str:
 
 
 def _parse_symbols(raw: str) -> List[str]:
-    """Split a comma- or whitespace-separated symbol list, trimmed + deduped
-    while preserving order."""
+    """Split a comma- or whitespace-separated symbol list, trimmed +
+    deduped while preserving order."""
     if not raw:
         return []
     parts = [p.strip() for chunk in raw.split(",") for p in chunk.split()]
@@ -462,14 +499,21 @@ class WorkerConfig:
     alloc_fraction: float = 0.5
     poll_seconds: int = 60
 
-    # feed credentials (only the ones for this asset are needed)
-    crypto_exchange: str = "binance"          # hardwired to Binance testnet
-    binance_testnet_key: str = ""             # required when asset=crypto
-    binance_testnet_secret: str = ""          # required when asset=crypto
-    oanda_token: str = ""
-    oanda_account: str = ""
-    alpaca_key: str = ""
-    alpaca_secret: str = ""
+    # ---- crypto: Kraken (public data; keys OPTIONAL) ----------------
+    crypto_exchange: str = "kraken"           # hardwired to Kraken
+    kraken_key: str = ""                      # optional (raises rate limits)
+    kraken_secret: str = ""                   # optional
+
+    # ---- forex + stocks: Interactive Brokers PAPER ------------------
+    # Connect to a running IB Gateway / TWS. clientId is resolved
+    # PER ASSET (stocks vs forex) so the two workers don't collide.
+    ib_host: str = "127.0.0.1"
+    ib_port: int = 4002                       # 4002=Gateway paper,
+                                              # 7497=TWS paper
+    ib_client_id: int = 11                    # set per-asset below
+    ib_account: str = ""                      # optional paper acct id
+    ib_market_data_type: int = 3              # 3=delayed,4=delayed-frozen,
+                                              # 1=live (needs subscription)
 
     db_path: str = "data/results.db"
     tg_token: str = ""
@@ -477,12 +521,18 @@ class WorkerConfig:
     heartbeat_url: str = ""
 
 
+def _ib_client_id_for(asset: str) -> int:
+    """Distinct IB clientId per asset so stocks + forex workers can both
+    connect to the same IB Gateway concurrently."""
+    cid_stocks = int(os.environ.get("IB_CLIENT_ID_STOCKS", "11"))
+    cid_forex = int(os.environ.get("IB_CLIENT_ID_FOREX", "12"))
+    return cid_forex if asset == "forex" else cid_stocks
+
+
 def load_worker_config_for(asset: str) -> WorkerConfig:
     """Build a WorkerConfig for a SPECIFIC asset, ignoring the ASSET env
     var. Used by the in-dashboard worker runner that spawns one thread
-    per asset from a single process. Env-var SYMBOLS is honored ONLY when
-    a single asset is being run via the standalone entrypoint — when the
-    dashboard runs everything, symbol selection is per-asset in the DB."""
+    per asset from a single process."""
     asset = asset.strip().lower()
     if asset not in ("crypto", "forex", "stocks"):
         raise RuntimeError("asset must be crypto|forex|stocks")
@@ -492,13 +542,15 @@ def load_worker_config_for(asset: str) -> WorkerConfig:
         start_equity=float(os.environ.get("START_EQUITY", "10000")),
         alloc_fraction=float(os.environ.get("ALLOC_FRACTION", "0.5")),
         poll_seconds=int(os.environ.get("POLL_SECONDS", "60")),
-        crypto_exchange=os.environ.get("CRYPTO_EXCHANGE", "binance"),
-        binance_testnet_key=os.environ.get("BINANCE_TESTNET_KEY", ""),
-        binance_testnet_secret=os.environ.get("BINANCE_TESTNET_SECRET", ""),
-        oanda_token=os.environ.get("OANDA_TOKEN", ""),
-        oanda_account=os.environ.get("OANDA_ACCOUNT", ""),
-        alpaca_key=os.environ.get("ALPACA_KEY", ""),
-        alpaca_secret=os.environ.get("ALPACA_SECRET", ""),
+        crypto_exchange=os.environ.get("CRYPTO_EXCHANGE", "kraken"),
+        kraken_key=os.environ.get("KRAKEN_KEY", ""),
+        kraken_secret=os.environ.get("KRAKEN_SECRET", ""),
+        ib_host=os.environ.get("IB_HOST", "127.0.0.1"),
+        ib_port=int(os.environ.get("IB_PORT", "4002")),
+        ib_client_id=_ib_client_id_for(asset),
+        ib_account=os.environ.get("IB_ACCOUNT", ""),
+        ib_market_data_type=int(os.environ.get("IB_MARKET_DATA_TYPE",
+                                               "3")),
         db_path=os.environ.get("DB_PATH", "data/results.db"),
         tg_token=os.environ.get("TG_TOKEN", ""),
         tg_chat=os.environ.get("TG_CHAT", ""),
@@ -512,8 +564,6 @@ def load_worker_config() -> WorkerConfig:
         raise RuntimeError("ASSET must be crypto|forex|stocks")
 
     # SYMBOLS (plural) wins. SYMBOL (singular, legacy) is also accepted.
-    # When set, it pins this standalone worker to a fixed symbol list and
-    # bypasses the dashboard's per-asset checkbox selection.
     symbols = _parse_symbols(os.environ.get("SYMBOLS", ""))
     if not symbols:
         symbols = _parse_symbols(os.environ.get("SYMBOL", ""))
@@ -521,7 +571,6 @@ def load_worker_config() -> WorkerConfig:
     cfg = load_worker_config_for(asset)
     cfg.symbols = symbols
     return cfg
-
 
 # ====== End of core/config.py ======
 
@@ -578,30 +627,37 @@ class DataFeed(ABC):
 """
 core/behavior.py
 
-Behavior primitives composed into the three matrix behaviors in
+Behavior primitives composed into the matrix behaviors in
 core/matrix.py:
 
     tp        = TakeProfit
     tp_sl     = Composite(HardStop, TakeProfit)
-    tp_trail  = Composite(TrailingStop, TakeProfit)
+    tp_trail  = Composite(AtrTrailingStop, TakeProfit)   # <-- ported
 
-TrailingStop notes (important for tp_trail):
+TrailingStop notes (the original percentage trail, kept available):
 With the default activate_pct=0.0 the trail's high-water mark starts at
 the entry price, so a `pct` drop from entry triggers it BEFORE the trade
-is ever in profit. The combined `tp_trail` exploits this on purpose: the
-trail acts as an initial stop at `pct` below entry, then ratchets UP
-with the high-water mark, so if price runs toward TP and reverses you
-still exit with locked-in profit. Set activate_pct>0 to arm the trail
-only once price is that far above entry (a pure profit-trailer with no
-initial stop). The matrix uses activate_pct=0 so tp_trail also has a
-floor under losing trades.
+is ever in profit. Set activate_pct>0 to arm the trail only once price
+is that far above entry (a pure profit-trailer with no initial stop).
+
+AtrTrailingStop (NEW — ported from the previous MT5 bot):
+The previous bot trailed the stop by an ATR-scaled distance
+(`trailing_distance = ATR * 1.2`), only ever moved the stop in the
+favourable direction, and additionally refused to tighten it unless it
+still gave "reasonable protection". This behavior reproduces that:
+distance = ATR * atr_mult, ratchets up with the high-water mark, never
+loosens, with an optional activate_pct mirroring the protection guard.
+The lab feed carries closes only (no OHLC), so ATR is estimated from the
+close-to-close path — the same close-only simplification the strategies
+already make, so it stays consistent and offline-testable.
 
 Also adds AllOf: Composite is "exit if ANY child"; AllOf is "exit only
 if ALL children".
 """
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import List
 
 
 @dataclass
@@ -611,6 +667,11 @@ class PositionState:
     high_water: float
     low_water: float
     bars_held: int
+    # Optional recent close series for the held symbol. Volatility-aware
+    # behaviors (AtrTrailingStop) read this; all others ignore it. Kept
+    # last with a default so every existing PositionState(...) call and
+    # every existing Behavior keeps working unchanged.
+    closes: List[float] = field(default_factory=list)
 
 
 class Behavior(ABC):
@@ -633,14 +694,12 @@ class NoBehavior(Behavior):
 
 class TrailingStop(Behavior):
     """
-    Exit if price falls `pct`% below its high-water mark since entry.
+    Percentage trailing stop (the lab's original trail — kept available).
 
-    IMPORTANT: with activate_pct=0.0 (default) the trail is armed
-    immediately, so before the trade is ever in profit this behaves like
-    a HARD STOP at `pct` below entry. Set activate_pct>0 to only arm the
-    trail once price is that far above entry (a true profit-trailing
-    stop). The matrix's `tp_trail` behavior uses the default so the
-    trail also serves as a floor under losing trades.
+    Exit if price falls `pct`% below its high-water mark since entry.
+    With activate_pct=0.0 (default) it behaves like a hard stop at `pct`
+    below entry until the trade is in profit. Set activate_pct>0 for a
+    pure profit-trailing stop with no initial floor.
     """
 
     def __init__(self, pct: float = 2.0, activate_pct: float = 0.0):
@@ -657,6 +716,73 @@ class TrailingStop(Behavior):
             return False                      # trail not armed yet
         drop = (ps.high_water - ps.last_price) / ps.high_water * 100.0
         return drop >= self.pct
+
+
+def _atr_from_closes(closes: List[float], period: int) -> float:
+    """Close-to-close ATR proxy.
+
+    True Wilder ATR needs per-bar high/low/close; the lab feed only
+    carries closes (and the strategies already work close-only), so we
+    approximate true range with |close[i] - close[i-1]| and average the
+    last `period` of them. This keeps the ported trailing logic faithful
+    in spirit (ATR-scaled distance) without changing the feed contract.
+    """
+    n = len(closes)
+    if n < period + 1:
+        return 0.0
+    diffs = [abs(closes[i] - closes[i - 1])
+             for i in range(n - period, n)]
+    return sum(diffs) / period
+
+
+class AtrTrailingStop(Behavior):
+    """
+    ATR-based trailing stop, ported from the previous MT5 bot's
+    apply_trailing_stop().
+
+    Behaviour reproduced:
+      - trailing distance = ATR * atr_mult   (previous bot used 1.2)
+      - the stop only ever moves UP (ratchets with the high-water mark),
+        never loosens — exactly like the MT5 `new_sl > pos.sl` guard.
+      - optional activate_pct: the stop stays disarmed until the trade
+        is at least activate_pct% in profit, mirroring the previous
+        bot's "(current_price - new_sl) > (...)*0.5" protection guard
+        (kept off by default so tp_trail still floors losing trades).
+
+    Stateful: keeps its own ratcheted stop level, cleared on reset()
+    when a new position opens.
+    """
+
+    def __init__(self, period: int = 24, atr_mult: float = 1.2,
+                 activate_pct: float = 0.0):
+        self.period = period
+        self.atr_mult = atr_mult
+        self.activate_pct = activate_pct
+        self.name = (f"atrtrail{atr_mult:g}" if activate_pct == 0
+                     else f"atrtrail{atr_mult:g}a{activate_pct:g}")
+        self._stop = None
+
+    def reset(self) -> None:
+        self._stop = None
+
+    def should_exit(self, ps: PositionState) -> bool:
+        closes = ps.closes or []
+        if ps.entry_price <= 0 or ps.high_water <= 0:
+            return False
+        if len(closes) < self.period + 1:
+            return False
+        atr = _atr_from_closes(closes, self.period)
+        if atr <= 0:
+            return False
+
+        gain_to_high = (ps.high_water - ps.entry_price) / ps.entry_price * 100.0
+        if gain_to_high < self.activate_pct:
+            return False                      # trail not armed yet
+
+        candidate = ps.high_water - atr * self.atr_mult
+        if self._stop is None or candidate > self._stop:
+            self._stop = candidate            # ratchet up only
+        return ps.last_price <= self._stop
 
 
 class HardStop(Behavior):
@@ -725,6 +851,11 @@ Adds to_state()/load_state() so a worker restart RESUMES each combo
 exactly where it left off (review #3). Previously a restart silently
 rebuilt every broker at start_equity, putting a fake cliff in every
 equity curve and corrupting Sharpe / drawdown / "best per kind".
+
+v2.2: position_state() now optionally carries the recent close series
+so volatility-aware behaviors (AtrTrailingStop, ported from the MT5
+bot) can size their trailing distance off ATR. Defaulted, so existing
+callers keep working.
 """
 
 from core.behavior import PositionState
@@ -772,9 +903,13 @@ class PaperBroker:
             self.low = min(self.low, price)
             self.bars += 1
 
-    def position_state(self) -> PositionState:
+    def position_state(self, closes=None) -> PositionState:
+        """Snapshot for behaviors. `closes` (recent close series of the
+        held symbol) is optional and only consumed by volatility-aware
+        behaviors such as AtrTrailingStop; all others ignore it."""
         return PositionState(self.entry, self.last, self.high,
-                             self.low, self.bars)
+                             self.low, self.bars,
+                             list(closes) if closes else [])
 
     # ---- execution -----------------------------------------------------
     def open_long(self, price: float) -> None:
@@ -868,69 +1003,79 @@ So the combo count per asset is STRATEGIES x BEHAVIORS = 4 x 3 = 12
 (not multiplied by symbols). Adding symbols deepens the search a combo
 performs each tick; it does NOT split P&L attribution across symbols.
 
-Edit the dimensions below to grow/shrink the experiment. The default
-symbols list per asset can be overridden by the SYMBOLS env var
-(comma-separated), or the legacy SYMBOL env var for a single symbol.
+CHANGES vs. the original lab (porting from the previous MT5 bot):
+  - The `breakout` strategy has been REPLACED by `indicator`
+    (strategies/indicator_macd_rsi.py) — the EMA/MACD/RSI confirmation
+    logic ported 1:1 from the previous bot's check_signals().
+  - The `tp_trail` behavior now uses AtrTrailingStop (ATR-scaled
+    trailing distance, ratchets up, never loosens) instead of the
+    fixed-percentage TrailingStop — the previous bot's
+    apply_trailing_stop() logic. The percentage TrailingStop class is
+    still available in core/behavior.py if you want to A/B it.
+
+Edit the dimensions below to grow/shrink the experiment.
 """
 
 from typing import Iterable, List
 
 from strategies.sma_crossover import SmaCrossover
 from strategies.rsi_meanrev import RsiMeanRev
-from strategies.breakout import Breakout
+from strategies.indicator_macd import IndicatorMacd 
+from strategies.indicator_rsi import IndicatorRsi
 from strategies.momentum import Momentum
 
-from core.behavior import TrailingStop, HardStop, TakeProfit, Composite
+from core.behavior import (AtrTrailingStop, TrailingStop, HardStop,
+                           TakeProfit, Composite)
 
 
 # ---- factories so each combo gets a FRESH instance -----------------------
-# Four strategies — one from each archetype (trend, mean-reversion,
-# breakout, momentum) so the matrix tests genuinely different decision
-# logic rather than two flavors of the same idea.
+# Four strategies — one trend (sma), one mean-reversion (rsi), one
+# momentum (momentum), and the ported multi-indicator confirmation
+# strategy (indicator: EMA + MACD + RSI) that replaced the old breakout.
 STRATEGIES = {
-    "sma":      lambda: SmaCrossover(fast=10, slow=30),
-    "rsi":      lambda: RsiMeanRev(period=14, oversold=30, exit_level=50),
-    "breakout": lambda: Breakout(channel=20),
-    "momentum": lambda: Momentum(lookback_bars=24),
+    "sma":       lambda: SmaCrossover(fast=10, slow=30),
+    "rsi":       lambda: RsiMeanRev(period=14, oversold=30, exit_level=50),
+    "indicator_MACD": lambda: IndicatorMacd(fast_ema=15, slow_ema=44,
+                                          macd_fast=12, macd_slow=26,
+                                          macd_signal=9),
+    "indicator_RSI": lambda: IndicatorRsi(fast_ema=15, slow_ema=44,
+                                          big_fast_ema=50, big_slow_ema=180,
+                                           rsi_period=14),
+    "momentum":  lambda: Momentum(lookback_bars=24),
 }
 
 # Three behaviors — every trade has a take-profit; the SL axis is what
 # varies, so the dashboard can directly answer "does a stop-loss help on
-# this asset, and if so, fixed or trailing?"
+# this asset, and if so, fixed or (ATR-)trailing?"
 #
 #   tp        : take-profit ONLY, no stop-loss
 #   tp_sl     : take-profit + FIXED stop-loss at entry
-#   tp_trail  : take-profit + TRAILING stop-loss that ratchets up with
-#               the high-water mark, locking in profit if price runs
-#               toward TP and then reverses
+#   tp_trail  : take-profit + ATR TRAILING stop (ported from the MT5
+#               bot): distance = ATR * 1.2, ratchets up with the
+#               high-water mark, never loosens. Also floors losing
+#               trades (activate_pct=0) so it doubles as an initial stop.
 BEHAVIORS = {
     "tp":       lambda: TakeProfit(pct=5.0),
     "tp_sl":    lambda: Composite("tp_sl",
                                   HardStop(pct=3.0), TakeProfit(pct=5.0)),
     "tp_trail": lambda: Composite("tp_trail",
-                                  TrailingStop(pct=2.0),
+                                  AtrTrailingStop(period=24,
+                                                  atr_mult=1.2),
                                   TakeProfit(pct=5.0)),
 }
 
 # Asset class -> master AVAILABLE symbols list + a realistic round-trip
 # cost assumption in basis points (fee + spread + slippage). These differ
 # a lot by market and DELIBERATELY affect who wins; tune them honestly.
-#
-# The list below is the MASTER set the user can choose from in the
-# dashboard. The dashboard persists per-asset checkbox selections in the
-# `symbol_inclusion` table; workers read that table each tick. So this
-# file defines what's AVAILABLE; the DB defines what's INCLUDED right
-# now. Adding a ticker here makes it appear (default: included) in the
-# dashboard checkbox list next time the dashboard is loaded. Be
-# reasonable: 5-10 symbols per asset is comfortable on a small VPS;
-# 20+ may bump into rate limits, especially on OANDA.
 ASSETS = {
     "crypto": {
+        # Kraken spot pairs (verify any new ticker on kraken.com first).
         "available_symbols": ["BTC/USDT", "ETH/USDT", "SOL/USDT",
-                              "BNB/USDT", "XRP/USDT", "ADA/USDT",
+                              "DOT/USDT", "XRP/USDT", "ADA/USDT",
                               "DOGE/USDT", "LTC/USDT"],
-        "cost_bps": 12.0,
+        "cost_bps": 16.0,   # Kraken taker fees/spread run a bit higher
     },
+   
     "forex": {
         "available_symbols": ["EUR_USD", "GBP_USD", "USD_JPY",
                               "AUD_USD", "USD_CAD", "USD_CHF",
@@ -984,7 +1129,6 @@ def build_combos():
 
 def combo_id(asset: str, strat: str, beh: str) -> str:
     return f"{asset}|{strat}|{beh}"
-
 
 # ====== End of core/matrix.py ======
 
@@ -1059,10 +1203,117 @@ CREATE INDEX IF NOT EXISTS ix_trades_dim
     ON trades (asset, symbol, strategy, behavior, ts);
 """
 
+CONTROL_TABLES = {
+    "heartbeat": {
+        "create": (
+            "CREATE TABLE {name} ("
+            "worker TEXT PRIMARY KEY, ts REAL, note TEXT)"
+        ),
+        "columns": ("worker", "ts", "note"),
+        "defaults": {"worker": "''", "ts": "0", "note": "''"},
+        "pk": ("worker",),
+    },
+    "worker_control": {
+        "create": (
+            "CREATE TABLE {name} ("
+            "asset TEXT PRIMARY KEY, desired_run INTEGER NOT NULL, "
+            "updated_ts REAL NOT NULL, updated_by TEXT, note TEXT)"
+        ),
+        "columns": ("asset", "desired_run", "updated_ts",
+                    "updated_by", "note"),
+        "defaults": {
+            "asset": "''",
+            "desired_run": "1",
+            "updated_ts": "0",
+            "updated_by": "''",
+            "note": "''",
+        },
+        "pk": ("asset",),
+    },
+    "combo_state": {
+        "create": (
+            "CREATE TABLE {name} ("
+            "combo TEXT PRIMARY KEY, ts REAL, state TEXT)"
+        ),
+        "columns": ("combo", "ts", "state"),
+        "defaults": {"combo": "''", "ts": "0", "state": "'{}'"},
+        "pk": ("combo",),
+    },
+    "symbol_inclusion": {
+        "create": (
+            "CREATE TABLE {name} ("
+            "asset TEXT NOT NULL, symbol TEXT NOT NULL, "
+            "included INTEGER NOT NULL, updated_ts REAL NOT NULL, "
+            "PRIMARY KEY (asset, symbol))"
+        ),
+        "columns": ("asset", "symbol", "included", "updated_ts"),
+        "defaults": {
+            "asset": "''",
+            "symbol": "''",
+            "included": "1",
+            "updated_ts": "0",
+        },
+        "pk": ("asset", "symbol"),
+    },
+}
+
 
 def _has_column(conn: sqlite3.Connection, table: str, col: str) -> bool:
     cur = conn.execute(f"PRAGMA table_info({table})")
     return any(row[1] == col for row in cur.fetchall())
+
+
+def _table_info(conn: sqlite3.Connection, table: str) -> list:
+    return list(conn.execute(f"PRAGMA table_info({table})"))
+
+
+def _pk_columns(conn: sqlite3.Connection, table: str) -> tuple:
+    info = _table_info(conn, table)
+    pk_rows = sorted(
+        ((row[5], row[1]) for row in info if row[5]),
+        key=lambda item: item[0],
+    )
+    return tuple(name for _, name in pk_rows)
+
+
+def _rebuild_control_table(conn: sqlite3.Connection, table: str,
+                           spec: dict) -> None:
+    """Recreate small control tables when an old schema lacks constraints.
+
+    SQLite cannot add a PRIMARY KEY with ALTER TABLE. These tables are
+    small metadata/control-plane tables, so rebuilding them is simpler
+    and safer than allowing later ON CONFLICT writes to fail.
+    """
+    tmp = f"__{table}_migrate"
+    conn.execute(f"DROP TABLE IF EXISTS {tmp}")
+    conn.execute(spec["create"].format(name=tmp))
+    existing = {row[1] for row in _table_info(conn, table)}
+    select_exprs = [
+        col if col in existing else spec["defaults"][col]
+        for col in spec["columns"]
+    ]
+    where = " AND ".join(
+        f"{col} IS NOT NULL AND {col} != ''"
+        for col in spec["pk"] if col in existing
+    )
+    sql = (
+        f"INSERT OR REPLACE INTO {tmp} "
+        f"({', '.join(spec['columns'])}) "
+        f"SELECT {', '.join(select_exprs)} FROM {table}"
+    )
+    if where:
+        sql += f" WHERE {where}"
+    conn.execute(sql)
+    conn.execute(f"DROP TABLE {table}")
+    conn.execute(f"ALTER TABLE {tmp} RENAME TO {table}")
+
+
+def _ensure_control_tables(conn: sqlite3.Connection) -> None:
+    for table, spec in CONTROL_TABLES.items():
+        existing = {row[1] for row in _table_info(conn, table)}
+        missing = set(spec["columns"]) - existing
+        if missing or _pk_columns(conn, table) != spec["pk"]:
+            _rebuild_control_table(conn, table, spec)
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
@@ -1070,6 +1321,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
     for table in ("equity", "trades"):
         if not _has_column(conn, table, "symbol"):
             conn.execute(f"ALTER TABLE {table} ADD COLUMN symbol TEXT")
+    _ensure_control_tables(conn)
     conn.commit()
 
 
@@ -1116,7 +1368,7 @@ class ResultsDB:
     def save_state(self, combo, state: dict):
         with self._lock:
             self.conn.execute(
-                "INSERT INTO combo_state VALUES (?,?,?) "
+                "INSERT INTO combo_state (combo, ts, state) VALUES (?,?,?) "
                 "ON CONFLICT(combo) DO UPDATE SET ts=excluded.ts, "
                 "state=excluded.state",
                 (combo, time.time(), json.dumps(state)))
@@ -1132,7 +1384,9 @@ class ResultsDB:
     def ensure_worker_control(self, asset: str, default_run: bool = True):
         with self._lock:
             self.conn.execute(
-                "INSERT OR IGNORE INTO worker_control VALUES (?,?,?,?,?)",
+                "INSERT OR IGNORE INTO worker_control "
+                "(asset, desired_run, updated_ts, updated_by, note) "
+                "VALUES (?,?,?,?,?)",
                 (asset, int(default_run), time.time(), "system",
                  "initial default"))
             self.conn.commit()
@@ -1141,7 +1395,9 @@ class ResultsDB:
                            updated_by: str = "dashboard", note: str = ""):
         with self._lock:
             self.conn.execute(
-                "INSERT INTO worker_control VALUES (?,?,?,?,?) "
+                "INSERT INTO worker_control "
+                "(asset, desired_run, updated_ts, updated_by, note) "
+                "VALUES (?,?,?,?,?) "
                 "ON CONFLICT(asset) DO UPDATE SET "
                 "desired_run=excluded.desired_run, "
                 "updated_ts=excluded.updated_ts, "
@@ -1203,7 +1459,7 @@ class ResultsDB:
     def beat(self, worker, note=""):
         with self._lock:
             self.conn.execute(
-                "INSERT INTO heartbeat VALUES (?,?,?) "
+                "INSERT INTO heartbeat (worker, ts, note) VALUES (?,?,?) "
                 "ON CONFLICT(worker) DO UPDATE SET ts=excluded.ts, "
                 "note=excluded.note",
                 (worker, time.time(), note))
@@ -1239,6 +1495,11 @@ each combo CONTINUOUSLY SCANS every symbol for entry signals.
 Combo identity is (asset, strategy, behavior). One PaperBroker per
 combo. SINGLE-POSITION MODEL: a combo is either flat or long on exactly
 one symbol.
+
+v2.2: when a combo is in a position, the held symbol's recent close
+series is passed into the behavior's position_state so ATR-aware
+behaviors (AtrTrailingStop, ported from the previous MT5 bot) can size
+their trailing distance. Behaviors that don't need it simply ignore it.
 
 Decision flow per combo per tick:
 
@@ -1312,14 +1573,15 @@ def build_feed(cfg: WorkerConfig):
         return SyntheticFeed()
     if cfg.asset == "crypto":
         from core.feeds.crypto_feed import CryptoFeed
-        return CryptoFeed(cfg.binance_testnet_key,
-                          cfg.binance_testnet_secret,
+        return CryptoFeed(cfg.kraken_key, cfg.kraken_secret,
                           cfg.crypto_exchange)
     if cfg.asset == "forex":
         from core.feeds.forex_feed import ForexFeed
-        return ForexFeed(cfg.oanda_token, cfg.oanda_account)
+        return ForexFeed(cfg.ib_host, cfg.ib_port, cfg.ib_client_id,
+                         cfg.ib_account, cfg.ib_market_data_type)
     from core.feeds.stocks_feed import StocksFeed
-    return StocksFeed(cfg.alpaca_key, cfg.alpaca_secret)
+    return StocksFeed(cfg.ib_host, cfg.ib_port, cfg.ib_client_id,
+                      cfg.ib_account, cfg.ib_market_data_type)
 
 
 class Combo:
@@ -1580,8 +1842,11 @@ def _step_in_position(cm: Combo, cache: dict, db: ResultsDB) -> None:
 
     held_symbol = cm.current_symbol  # remember for trade tagging
 
-    # behavior-forced exit
-    if br.in_position and cm.behavior.should_exit(br.position_state()):
+    # behavior-forced exit. Pass the held symbol's recent closes so
+    # ATR-aware behaviors (AtrTrailingStop, ported from the MT5 bot)
+    # can size their trailing distance; all other behaviors ignore it.
+    if br.in_position and cm.behavior.should_exit(
+            br.position_state(md.closes)):
         q = br.qty
         br.close(price)
         cm.locked = True
@@ -1660,7 +1925,6 @@ def _step_flat(cm: Combo, symbols: list, cache: dict,
         br.mark(observation_price)
         db.log_equity(cm.id, cm.asset, "", cm.skey, cm.bkey,
                       br.equity(observation_price), observation_price)
-
 
 # ====== End of core/worker.py ======
 
@@ -1746,29 +2010,23 @@ def heartbeat(url: str = "") -> None:
 # ====== Begin of core/feeds/crypto_feed.py ======
 
 """
-core/feeds/crypto_feed.py
+core/feeds/crypto_feed.py   (Kraken)
 
-Crypto data feed backed by a BINANCE DEMO (testnet) account.
+Crypto data feed backed by Kraken spot, via CCXT.
 
-The lab no longer uses public Kraken/CCXT data for crypto — every
-crypto worker connects to the official Binance Spot Testnet at
-https://testnet.binance.vision via CCXT's sandbox mode. The combos
-still execute fills internally on isolated PaperBrokers (so per-combo
-P&L attribution stays clean), but the price stream comes from the same
-exchange you would later promote a winner to.
+Why no testnet: Kraken has no public spot *testnet/sandbox* (only a
+separate Futures demo). Since this lab only needs DATA — every combo
+simulates fills on its own isolated PaperBroker for clean P&L
+attribution — we use Kraken's LIVE public market data. OHLCV and ticker
+are public endpoints, so API key/secret are OPTIONAL here and only
+serve to raise private rate limits. Leave them blank for data-only use.
+No real orders are ever sent.
 
-Set up once: register at https://testnet.binance.vision, generate an
-API key + secret, and put them in .env.shared as BINANCE_TESTNET_KEY /
-BINANCE_TESTNET_SECRET. The keys are required — the lab refuses to
-start the crypto worker without them, because the whole point of this
-update is that crypto runs on a real demo account, not a guess about
-public market data.
-
-Bar discipline (preserved from the prior implementation): the last
-OHLCV row returned by CCXT is the STILL-FORMING bar, so using its close
-as closes[-1] is intrabar lookahead. We drop it and use a separate
-ticker call for the live mark price. Raises FeedUnavailable if data
-is insufficient.
+Bar discipline (preserved): CCXT's last OHLCV row is the STILL-FORMING
+bar; using its close as closes[-1] is intrabar lookahead. We drop it
+and take a separate ticker call for the live mark. Raises
+FeedUnavailable when data is insufficient so the worker skips the tick
+instead of marking equity at a bad price.
 """
 
 import logging
@@ -1781,55 +2039,49 @@ log = logging.getLogger("feed.crypto")
 
 
 class CryptoFeed(DataFeed):
-    """Binance Spot Testnet feed via CCXT sandbox mode."""
+    """Kraken spot feed via CCXT (public data; keys optional)."""
 
-    def __init__(self, api_key: str, api_secret: str,
-                 exchange_id: str = "binance"):
-        if not api_key or not api_secret:
+    def __init__(self, api_key: str = "", api_secret: str = "",
+                 exchange_id: str = "kraken"):
+        if exchange_id != "kraken":
             raise RuntimeError(
-                "CryptoFeed requires BINANCE_TESTNET_KEY and "
-                "BINANCE_TESTNET_SECRET. Generate them at "
-                "https://testnet.binance.vision and put them in "
-                ".env.shared."
+                f"Crypto feed is now hardwired to Kraken; got "
+                f"exchange_id={exchange_id!r}. Set CRYPTO_EXCHANGE=kraken "
+                f"or remove it from your env."
             )
-        if exchange_id != "binance":
-            raise RuntimeError(
-                f"Crypto feed is hardwired to Binance testnet; got "
-                f"exchange_id={exchange_id!r}. Remove CRYPTO_EXCHANGE "
-                f"from your env or set it to 'binance'."
-            )
-        self.name = "crypto:binance-testnet"
-        self.ex = ccxt.binance({
-            "apiKey": api_key,
-            "secret": api_secret,
-            "enableRateLimit": True,
-            "options": {"defaultType": "spot"},
-        })
-        # Route every endpoint (public + private) to testnet.binance.vision
-        self.ex.set_sandbox_mode(True)
+        self.name = "crypto:kraken"
+        opts = {"enableRateLimit": True}
+        if api_key and api_secret:
+            opts["apiKey"] = api_key
+            opts["secret"] = api_secret
+        self.ex = ccxt.kraken(opts)
 
     def check(self) -> None:
         self.ex.load_markets()
-        # fetch_balance hits a PRIVATE endpoint; if keys are wrong this
-        # is where we fail fast at startup instead of mid-tick.
-        self.ex.fetch_balance()
-        log.info("[crypto] %s connected, %d markets, demo balance OK",
+        log.info("[crypto] %s connected, %d markets",
                  self.name, len(self.ex.markets))
 
     def get_market_data(self, symbol, timeframe, lookback) -> MarketData:
-        # fetch one extra, then DROP the last (still-forming) bar
-        ohlcv = self.ex.fetch_ohlcv(symbol, timeframe=timeframe,
-                                    limit=lookback + 1)
+        try:
+            ohlcv = self.ex.fetch_ohlcv(symbol, timeframe=timeframe,
+                                        limit=lookback + 1)
+        except Exception as e:
+            raise FeedUnavailable(
+                f"crypto {symbol}: ohlcv error: {e}") from e
         if not ohlcv or len(ohlcv) < 2:
             raise FeedUnavailable(f"crypto {symbol}: insufficient OHLCV")
-        complete = ohlcv[:-1]                     # exclude forming bar
+        complete = ohlcv[:-1]                      # drop forming bar
         closes = [row[4] for row in complete]
-        ticker = self.ex.fetch_ticker(symbol)
-        price = ticker.get("last")
+        try:
+            ticker = self.ex.fetch_ticker(symbol)
+            price = ticker.get("last")
+        except Exception as e:
+            raise FeedUnavailable(
+                f"crypto {symbol}: ticker error: {e}") from e
         if not price or price <= 0:
             raise FeedUnavailable(f"crypto {symbol}: no live price")
-        return MarketData(symbol=symbol, price=float(price), closes=closes)
-
+        return MarketData(symbol=symbol, price=float(price),
+                          closes=closes)
 
 # ====== End of core/feeds/crypto_feed.py ======
 
@@ -1838,64 +2090,58 @@ class CryptoFeed(DataFeed):
 # ====== Begin of core/feeds/forex_feed.py ======
 
 """
-core/feeds/forex_feed.py   (v2.1)
+core/feeds/forex_feed.py   (IBKR)
 
-Already complete-bar-only; now standardized to the shared contract and
-raises FeedUnavailable instead of returning bad data (review #4/#5).
+Interactive Brokers PAPER forex feed. Replaces the previous OANDA
+implementation. Data only — fills are simulated per-combo.
+
+Contract: Forex("EURUSD") etc. The lab's symbol convention is
+`EUR_USD`; we strip the separator to IB's `EURUSD`. FX uses MIDPOINT
+bars with useRTH=False (FX trades ~24x5, no "regular session"), and the
+live mark is the bid/ask midpoint to match the MIDPOINT bar series.
+
+Requires a reachable IB Gateway / TWS on a paper account with the API
+enabled. See core/feeds/ib_base.py for connection / pacing notes.
 """
 
-import logging
+import math
 
-from oandapyV20 import API
-import oandapyV20.endpoints.instruments as instruments
-import oandapyV20.endpoints.pricing as pricing
-
-from core.feed import DataFeed, MarketData, FeedUnavailable
-
-log = logging.getLogger("feed.forex")
-
-_TF = {"1m": "M1", "5m": "M5", "15m": "M15", "30m": "M30",
-       "1h": "H1", "4h": "H4", "1d": "D"}
+from core.feeds.ib_base import IBFeed
 
 
-class ForexFeed(DataFeed):
-    def __init__(self, token: str, account: str):
-        if not token or not account:
-            raise RuntimeError("Forex feed needs OANDA_TOKEN and OANDA_ACCOUNT")
-        self.name = "forex:oanda-practice"
-        self.acct = account
-        self.api = API(access_token=token, environment="practice")
+class ForexFeed(IBFeed):
+    what_to_show = "MIDPOINT"
+    use_rth = False
 
-    def check(self) -> None:
+    def __init__(self, host: str, port: int, client_id: int,
+                 account: str = "", market_data_type: int = 3):
+        super().__init__(host, port, client_id, account, market_data_type)
+        self.name = "forex:ibkr-paper"
+
+    def _contract(self, symbol: str):
+        from ib_async import Forex
+        pair = symbol.replace("_", "").replace("/", "").upper()
+        return Forex(pair)
+
+    def _snapshot_price(self, t) -> float:
+        # Prefer the true midpoint to match the MIDPOINT bar series.
+        mid = getattr(t, "midpoint", None)
+        if callable(mid):
+            try:
+                m = mid()
+                if m and not math.isnan(m) and m > 0:
+                    return float(m)
+            except Exception:
+                pass
+        bid = getattr(t, "bid", None)
+        ask = getattr(t, "ask", None)
         try:
-            self.get_market_data("EUR_USD", "5m", 5)
-            log.info("[forex] OANDA practice OK")
-        except FeedUnavailable as e:
-            log.warning("[forex] startup check: market data unavailable "
-                        "(may be weekend/closed): %s", e)
-
-    def get_market_data(self, symbol, timeframe, lookback) -> MarketData:
-        gran = _TF.get(timeframe, "M5")
-        r = instruments.InstrumentsCandles(
-            instrument=symbol,
-            params={"count": lookback + 1, "granularity": gran, "price": "M"},
-        )
-        self.api.request(r)
-        candles = [c for c in r.response["candles"] if c.get("complete")]
-        closes = [float(c["mid"]["c"]) for c in candles][-lookback:]
-        if len(closes) < 2:
-            raise FeedUnavailable(f"forex {symbol}: no complete candles")
-
-        p = pricing.PricingInfo(self.acct, params={"instruments": symbol})
-        self.api.request(p)
-        prices = p.response.get("prices") or []
-        if not prices:
-            raise FeedUnavailable(f"forex {symbol}: no pricing")
-        px = prices[0]
-        price = (float(px["closeoutBid"]) + float(px["closeoutAsk"])) / 2.0
-        if price <= 0:
-            raise FeedUnavailable(f"forex {symbol}: bad price")
-        return MarketData(symbol=symbol, price=price, closes=closes)
+            if (bid and ask and not math.isnan(bid)
+                    and not math.isnan(ask) and bid > 0 and ask > 0):
+                return (float(bid) + float(ask)) / 2.0
+        except TypeError:
+            pass
+        return super()._snapshot_price(t)
 
 # ====== End of core/feeds/forex_feed.py ======
 
@@ -1904,67 +2150,36 @@ class ForexFeed(DataFeed):
 # ====== Begin of core/feeds/stocks_feed.py ======
 
 """
-core/feeds/stocks_feed.py   (v2.1)
+core/feeds/stocks_feed.py   (IBKR)
 
-Fixes review #4: previously returned price=0.0 when no bars came back
-(market closed), and the worker logged equity at price 0 -> every metric
-skewed. Now it raises FeedUnavailable and the worker skips the tick.
-check() no longer passes vacuously.
+Interactive Brokers PAPER stocks feed. Replaces the previous Alpaca
+implementation. Data only — the lab never places real orders; fills are
+simulated per-combo on isolated PaperBrokers.
+
+Contract: Stock(SYMBOL, "SMART", "USD"), TRADES bars, regular trading
+hours only (useRTH=True) so the close-only series matches what a
+US-equities strategy would actually see.
+
+Requires a reachable IB Gateway / TWS logged into a paper account with
+the API enabled. See core/feeds/ib_base.py for the connection and
+pacing notes.
 """
 
-import logging
-
-from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import StockBarsRequest, StockLatestTradeRequest
-from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
-
-from core.feed import DataFeed, MarketData, FeedUnavailable
-
-log = logging.getLogger("feed.stocks")
+from core.feeds.ib_base import IBFeed
 
 
-def _tf(s: str) -> TimeFrame:
-    table = {
-        "1m": TimeFrame(1, TimeFrameUnit.Minute),
-        "5m": TimeFrame(5, TimeFrameUnit.Minute),
-        "15m": TimeFrame(15, TimeFrameUnit.Minute),
-        "1h": TimeFrame(1, TimeFrameUnit.Hour),
-        "1d": TimeFrame(1, TimeFrameUnit.Day),
-    }
-    return table.get(s, TimeFrame(5, TimeFrameUnit.Minute))
+class StocksFeed(IBFeed):
+    what_to_show = "TRADES"
+    use_rth = True
 
+    def __init__(self, host: str, port: int, client_id: int,
+                 account: str = "", market_data_type: int = 3):
+        super().__init__(host, port, client_id, account, market_data_type)
+        self.name = "stocks:ibkr-paper"
 
-class StocksFeed(DataFeed):
-    def __init__(self, key: str, secret: str):
-        if not key or not secret:
-            raise RuntimeError("Stocks feed needs ALPACA_KEY and ALPACA_SECRET")
-        self.name = "stocks:alpaca"
-        self.data = StockHistoricalDataClient(key, secret)
-
-    def check(self) -> None:
-        try:
-            md = self.get_market_data("SPY", "5m", 5)
-            log.info("[stocks] Alpaca data OK (price=%.2f)", md.price)
-        except FeedUnavailable as e:
-            log.warning("[stocks] startup check: market likely CLOSED "
-                        "(no bars). This is normal outside US RTH: %s", e)
-
-    def get_market_data(self, symbol, timeframe, lookback) -> MarketData:
-        req = StockBarsRequest(symbol_or_symbols=symbol,
-                               timeframe=_tf(timeframe), limit=lookback)
-        bars = self.data.get_stock_bars(req).data.get(symbol, [])
-        closes = [float(b.close) for b in bars]
-        if len(closes) < 2:
-            raise FeedUnavailable(f"stocks {symbol}: no bars (market closed?)")
-        try:
-            lt = self.data.get_stock_latest_trade(
-                StockLatestTradeRequest(symbol_or_symbols=symbol))
-            price = float(lt[symbol].price)
-        except Exception:
-            price = closes[-1]                     # fallback: last close
-        if price <= 0:
-            raise FeedUnavailable(f"stocks {symbol}: bad price")
-        return MarketData(symbol=symbol, price=price, closes=closes)
+    def _contract(self, symbol: str):
+        from ib_async import Stock
+        return Stock(symbol.upper(), "SMART", "USD")
 
 # ====== End of core/feeds/stocks_feed.py ======
 
@@ -2469,10 +2684,10 @@ def _run_all(desired_run: bool, note: str):
 
 st.subheader("Worker Control")
 left, mid, right = st.columns([1, 1, 3])
-if left.button("Run all three", type="primary", use_container_width=True):
+if left.button("Run all three", type="primary", width="stretch"):
     _run_all(True, "run all from dashboard")
     st.rerun()
-if mid.button("Stop all", use_container_width=True):
+if mid.button("Stop all", width="stretch"):
     _run_all(False, "stop all from dashboard")
     st.rerun()
 
@@ -2509,7 +2724,7 @@ for asset_name in ASSET_ORDER:
         "note": note,
     })
 
-st.dataframe(pd.DataFrame(status_rows), use_container_width=True,
+st.dataframe(pd.DataFrame(status_rows), width="stretch",
              hide_index=True)
 st.caption(
     "`applied=pending` means you just toggled this asset and the worker "
@@ -2535,7 +2750,7 @@ for asset_name in ASSET_ORDER:
         "last_error": info.get("last_error", "") or "—",
     })
 with st.expander("Embedded worker threads (advanced)", expanded=False):
-    st.dataframe(pd.DataFrame(runner_rows), use_container_width=True,
+    st.dataframe(pd.DataFrame(runner_rows), width="stretch",
                  hide_index=True)
     st.caption(
         "These are the supervising threads spawned by the dashboard. "
@@ -2695,7 +2910,7 @@ for asset_name in ASSET_ORDER:
         values=metric, aggfunc="first"
     ).reindex(index=STRATEGY_ORDER, columns=BEHAVIOR_ORDER)
     st.dataframe(pivot.style.format("{:.2f}", na_rep="—"),
-                 use_container_width=True)
+                 width="stretch")
     rk = sub[sub.rankable]
     if not rk.empty:
         best = rk.sort_values(metric, ascending=False).iloc[0]
@@ -2729,7 +2944,7 @@ for asset_name in ASSET_ORDER:
                 "symbol": sym if sym else "—",
                 "qty": round(qty, 6) if qty else 0.0,
             })
-st.dataframe(pd.DataFrame(pos_rows), use_container_width=True,
+st.dataframe(pd.DataFrame(pos_rows), width="stretch",
              hide_index=True)
 
 # Baseline = `tp` (take-profit only, no stop-loss). The behavior axis
@@ -2765,7 +2980,7 @@ for asset_name in ASSET_ORDER:
             f"avg_{metric}_vs_{BASELINE_BEHAVIOR}": (
                 round(avg, 3) if avg is not None else None),
         })
-st.dataframe(pd.DataFrame(hr), use_container_width=True, hide_index=True)
+st.dataframe(pd.DataFrame(hr), width="stretch", hide_index=True)
 
 st.warning(
     "Compare within an asset class, use annualized Sharpe over raw return, "
@@ -2788,7 +3003,12 @@ Pushes synthetic trend / chop / crash price paths through the ENTIRE
   - every strategy returns only valid actions
   - behaviors fire and exits are attributed
   - equity stays finite and non-negative
-This proves the v2 engine works before you touch any account.
+This proves the engine works before you touch any account.
+
+v2.2: the position snapshot now carries the recent close window so the
+ported ATR trailing stop (AtrTrailingStop in tp_trail) is exercised
+offline exactly as it runs live. The new `indicator` strategy (ported
+EMA/MACD/RSI logic) is picked up automatically from STRATEGIES.
 
     python selftest.py
 """
@@ -2802,7 +3022,7 @@ from core.paper import PaperBroker
 VALID = {"buy", "sell", "hold"}
 
 
-def path(n=200, kind="trend"):
+def path(n=260, kind="trend"):
     out = []
     for i in range(n):
         if kind == "trend":
@@ -2810,7 +3030,7 @@ def path(n=200, kind="trend"):
         elif kind == "chop":
             out.append(100 + 6 * math.sin(i / 4))
         else:  # crash then recover
-            out.append(150 - i * 0.4 if i < 120 else 102 + (i - 120) * 0.2)
+            out.append(150 - i * 0.4 if i < 160 else 102 + (i - 160) * 0.2)
     return out
 
 
@@ -2825,7 +3045,8 @@ def simulate(skey, bkey, prices):
         closes = prices[i - win:i]
         md = MarketData("TEST", prices[i], closes)
         br.mark(prices[i])
-        if br.in_position and beh.should_exit(br.position_state()):
+        # pass the close window so ATR-aware behaviors size correctly
+        if br.in_position and beh.should_exit(br.position_state(closes)):
             br.close(prices[i]); locked = True; behavior_exits += 1
         action = strat.decide(md, br.qty)
         assert action in VALID, f"{skey} returned {action!r}"
@@ -2842,14 +3063,14 @@ def simulate(skey, bkey, prices):
 
 def main():
     ok = True
-    print(f"{'strategy':<11}{'behavior':<12}{'kind':<7}"
+    print(f"{'strategy':<18}{'behavior':<12}{'kind':<7}"
           f"{'end_eq':>10}{'trades':>8}{'beh_exit':>9}")
     for skey in STRATEGIES:
         for bkey in BEHAVIORS:
             for kind in ("trend", "chop", "crash"):
                 try:
                     eq, tr, bx = simulate(skey, bkey, path(kind=kind))
-                    print(f"{skey:<11}{bkey:<12}{kind:<7}"
+                    print(f"{skey:<18}{bkey:<12}{kind:<7}"
                           f"{eq:>10.0f}{tr:>8}{bx:>9}")
                 except AssertionError as e:
                     ok = False
@@ -2860,7 +3081,6 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
 # ====== End of selftest.py ======
 
@@ -2946,6 +3166,8 @@ services:
       --server.port 8501
       --server.address 0.0.0.0
       --server.headless true
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       - DB_PATH=data/results.db
       - MIN_TRADES=20
@@ -2955,7 +3177,18 @@ services:
       - POLL_SECONDS=60
       - WORKER_AUTOSTART=true
       - EMBED_WORKERS=1
-      - CRYPTO_EXCHANGE=binance
+      - CRYPTO_EXCHANGE=kraken
+      - IB_HOST=host.docker.internal
+      - IB_PORT=4002
+      - IB_CLIENT_ID_STOCKS=11
+      - IB_CLIENT_ID_FOREX=12
+      - IB_MARKET_DATA_TYPE=3
+      - IB_CACHE_TTL=120
+      # Recommended: IB historical-data pacing is ~60 req / 10 min.
+      # 60s polling across many symbols/timeframes will trip it.
+      - POLL_SECONDS=300
+      - HOME=/app                                  # <-- add: writable home (chowned to lab)
+      - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
     env_file: ./.env.shared        # all feed credentials + optional
                                    # DASHBOARD_PASSWORD live here
     restart: always
@@ -3022,15 +3255,13 @@ DASHBOARD_PASSWORD=
 # ====== Begin of requirements.txt ======
 
 ccxt==4.4.20
-oandapyV20==0.7.2
-alpaca-py==0.30.1
+ib_async==1.0.3
 pandas==2.2.3
 numpy==2.1.3
-streamlit==1.40.1
+streamlit==1.57.0
 requests==2.32.3
 python-dotenv==1.0.1
 pytest==8.2.2
-
 
 # ====== End of requirements.txt ======
 

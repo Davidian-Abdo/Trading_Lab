@@ -1,27 +1,21 @@
 """
-core/feeds/crypto_feed.py
+core/feeds/crypto_feed.py   (Kraken)
 
-Crypto data feed backed by a BINANCE DEMO (testnet) account.
+Crypto data feed backed by Kraken spot, via CCXT.
 
-The lab no longer uses public Kraken/CCXT data for crypto — every
-crypto worker connects to the official Binance Spot Testnet at
-https://testnet.binance.vision via CCXT's sandbox mode. The combos
-still execute fills internally on isolated PaperBrokers (so per-combo
-P&L attribution stays clean), but the price stream comes from the same
-exchange you would later promote a winner to.
+Why no testnet: Kraken has no public spot *testnet/sandbox* (only a
+separate Futures demo). Since this lab only needs DATA — every combo
+simulates fills on its own isolated PaperBroker for clean P&L
+attribution — we use Kraken's LIVE public market data. OHLCV and ticker
+are public endpoints, so API key/secret are OPTIONAL here and only
+serve to raise private rate limits. Leave them blank for data-only use.
+No real orders are ever sent.
 
-Set up once: register at https://testnet.binance.vision, generate an
-API key + secret, and put them in .env.shared as BINANCE_TESTNET_KEY /
-BINANCE_TESTNET_SECRET. The keys are required — the lab refuses to
-start the crypto worker without them, because the whole point of this
-update is that crypto runs on a real demo account, not a guess about
-public market data.
-
-Bar discipline (preserved from the prior implementation): the last
-OHLCV row returned by CCXT is the STILL-FORMING bar, so using its close
-as closes[-1] is intrabar lookahead. We drop it and use a separate
-ticker call for the live mark price. Raises FeedUnavailable if data
-is insufficient.
+Bar discipline (preserved): CCXT's last OHLCV row is the STILL-FORMING
+bar; using its close as closes[-1] is intrabar lookahead. We drop it
+and take a separate ticker call for the live mark. Raises
+FeedUnavailable when data is insufficient so the worker skips the tick
+instead of marking equity at a bad price.
 """
 
 import logging
@@ -34,51 +28,46 @@ log = logging.getLogger("feed.crypto")
 
 
 class CryptoFeed(DataFeed):
-    """Binance Spot Testnet feed via CCXT sandbox mode."""
+    """Kraken spot feed via CCXT (public data; keys optional)."""
 
-    def __init__(self, api_key: str, api_secret: str,
-                 exchange_id: str = "binance"):
-        if not api_key or not api_secret:
+    def __init__(self, api_key: str = "", api_secret: str = "",
+                 exchange_id: str = "kraken"):
+        if exchange_id != "kraken":
             raise RuntimeError(
-                "CryptoFeed requires BINANCE_TESTNET_KEY and "
-                "BINANCE_TESTNET_SECRET. Generate them at "
-                "https://testnet.binance.vision and put them in "
-                ".env.shared."
+                f"Crypto feed is now hardwired to Kraken; got "
+                f"exchange_id={exchange_id!r}. Set CRYPTO_EXCHANGE=kraken "
+                f"or remove it from your env."
             )
-        if exchange_id != "binance":
-            raise RuntimeError(
-                f"Crypto feed is hardwired to Binance testnet; got "
-                f"exchange_id={exchange_id!r}. Remove CRYPTO_EXCHANGE "
-                f"from your env or set it to 'binance'."
-            )
-        self.name = "crypto:binance-testnet"
-        self.ex = ccxt.binance({
-            "apiKey": api_key,
-            "secret": api_secret,
-            "enableRateLimit": True,
-            "options": {"defaultType": "spot"},
-        })
-        # Route every endpoint (public + private) to testnet.binance.vision
-        self.ex.set_sandbox_mode(True)
+        self.name = "crypto:kraken"
+        opts = {"enableRateLimit": True}
+        if api_key and api_secret:
+            opts["apiKey"] = api_key
+            opts["secret"] = api_secret
+        self.ex = ccxt.kraken(opts)
 
     def check(self) -> None:
         self.ex.load_markets()
-        # fetch_balance hits a PRIVATE endpoint; if keys are wrong this
-        # is where we fail fast at startup instead of mid-tick.
-        self.ex.fetch_balance()
-        log.info("[crypto] %s connected, %d markets, demo balance OK",
+        log.info("[crypto] %s connected, %d markets",
                  self.name, len(self.ex.markets))
 
     def get_market_data(self, symbol, timeframe, lookback) -> MarketData:
-        # fetch one extra, then DROP the last (still-forming) bar
-        ohlcv = self.ex.fetch_ohlcv(symbol, timeframe=timeframe,
-                                    limit=lookback + 1)
+        try:
+            ohlcv = self.ex.fetch_ohlcv(symbol, timeframe=timeframe,
+                                        limit=lookback + 1)
+        except Exception as e:
+            raise FeedUnavailable(
+                f"crypto {symbol}: ohlcv error: {e}") from e
         if not ohlcv or len(ohlcv) < 2:
             raise FeedUnavailable(f"crypto {symbol}: insufficient OHLCV")
-        complete = ohlcv[:-1]                     # exclude forming bar
+        complete = ohlcv[:-1]                      # drop forming bar
         closes = [row[4] for row in complete]
-        ticker = self.ex.fetch_ticker(symbol)
-        price = ticker.get("last")
+        try:
+            ticker = self.ex.fetch_ticker(symbol)
+            price = ticker.get("last")
+        except Exception as e:
+            raise FeedUnavailable(
+                f"crypto {symbol}: ticker error: {e}") from e
         if not price or price <= 0:
             raise FeedUnavailable(f"crypto {symbol}: no live price")
-        return MarketData(symbol=symbol, price=float(price), closes=closes)
+        return MarketData(symbol=symbol, price=float(price),
+                          closes=closes)

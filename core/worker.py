@@ -87,14 +87,15 @@ def build_feed(cfg: WorkerConfig):
         return SyntheticFeed()
     if cfg.asset == "crypto":
         from core.feeds.crypto_feed import CryptoFeed
-        return CryptoFeed(cfg.binance_testnet_key,
-                          cfg.binance_testnet_secret,
+        return CryptoFeed(cfg.kraken_key, cfg.kraken_secret,
                           cfg.crypto_exchange)
     if cfg.asset == "forex":
         from core.feeds.forex_feed import ForexFeed
-        return ForexFeed(cfg.oanda_token, cfg.oanda_account)
+        return ForexFeed(cfg.ib_host, cfg.ib_port, cfg.ib_client_id,
+                         cfg.ib_account, cfg.ib_market_data_type)
     from core.feeds.stocks_feed import StocksFeed
-    return StocksFeed(cfg.alpaca_key, cfg.alpaca_secret)
+    return StocksFeed(cfg.ib_host, cfg.ib_port, cfg.ib_client_id,
+                      cfg.ib_account, cfg.ib_market_data_type)
 
 
 class Combo:

@@ -1,59 +1,53 @@
 """
-core/feeds/forex_feed.py   (v2.1)
+core/feeds/forex_feed.py   (IBKR)
 
-Already complete-bar-only; now standardized to the shared contract and
-raises FeedUnavailable instead of returning bad data (review #4/#5).
+Interactive Brokers PAPER forex feed. Replaces the previous OANDA
+implementation. Data only — fills are simulated per-combo.
+
+Contract: Forex("EURUSD") etc. The lab's symbol convention is
+`EUR_USD`; we strip the separator to IB's `EURUSD`. FX uses MIDPOINT
+bars with useRTH=False (FX trades ~24x5, no "regular session"), and the
+live mark is the bid/ask midpoint to match the MIDPOINT bar series.
+
+Requires a reachable IB Gateway / TWS on a paper account with the API
+enabled. See core/feeds/ib_base.py for connection / pacing notes.
 """
 
-import logging
+import math
 
-from oandapyV20 import API
-import oandapyV20.endpoints.instruments as instruments
-import oandapyV20.endpoints.pricing as pricing
-
-from core.feed import DataFeed, MarketData, FeedUnavailable
-
-log = logging.getLogger("feed.forex")
-
-_TF = {"1m": "M1", "5m": "M5", "15m": "M15", "30m": "M30",
-       "1h": "H1", "4h": "H4", "1d": "D"}
+from core.feeds.ib_base import IBFeed
 
 
-class ForexFeed(DataFeed):
-    def __init__(self, token: str, account: str):
-        if not token or not account:
-            raise RuntimeError("Forex feed needs OANDA_TOKEN and OANDA_ACCOUNT")
-        self.name = "forex:oanda-practice"
-        self.acct = account
-        self.api = API(access_token=token, environment="practice")
+class ForexFeed(IBFeed):
+    what_to_show = "MIDPOINT"
+    use_rth = False
 
-    def check(self) -> None:
+    def __init__(self, host: str, port: int, client_id: int,
+                 account: str = "", market_data_type: int = 3):
+        super().__init__(host, port, client_id, account, market_data_type)
+        self.name = "forex:ibkr-paper"
+
+    def _contract(self, symbol: str):
+        from ib_async import Forex
+        pair = symbol.replace("_", "").replace("/", "").upper()
+        return Forex(pair)
+
+    def _snapshot_price(self, t) -> float:
+        # Prefer the true midpoint to match the MIDPOINT bar series.
+        mid = getattr(t, "midpoint", None)
+        if callable(mid):
+            try:
+                m = mid()
+                if m and not math.isnan(m) and m > 0:
+                    return float(m)
+            except Exception:
+                pass
+        bid = getattr(t, "bid", None)
+        ask = getattr(t, "ask", None)
         try:
-            self.get_market_data("EUR_USD", "5m", 5)
-            log.info("[forex] OANDA practice OK")
-        except FeedUnavailable as e:
-            log.warning("[forex] startup check: market data unavailable "
-                        "(may be weekend/closed): %s", e)
-
-    def get_market_data(self, symbol, timeframe, lookback) -> MarketData:
-        gran = _TF.get(timeframe, "M5")
-        r = instruments.InstrumentsCandles(
-            instrument=symbol,
-            params={"count": lookback + 1, "granularity": gran, "price": "M"},
-        )
-        self.api.request(r)
-        candles = [c for c in r.response["candles"] if c.get("complete")]
-        closes = [float(c["mid"]["c"]) for c in candles][-lookback:]
-        if len(closes) < 2:
-            raise FeedUnavailable(f"forex {symbol}: no complete candles")
-
-        p = pricing.PricingInfo(self.acct, params={"instruments": symbol})
-        self.api.request(p)
-        prices = p.response.get("prices") or []
-        if not prices:
-            raise FeedUnavailable(f"forex {symbol}: no pricing")
-        px = prices[0]
-        price = (float(px["closeoutBid"]) + float(px["closeoutAsk"])) / 2.0
-        if price <= 0:
-            raise FeedUnavailable(f"forex {symbol}: bad price")
-        return MarketData(symbol=symbol, price=price, closes=closes)
+            if (bid and ask and not math.isnan(bid)
+                    and not math.isnan(ask) and bid > 0 and ask > 0):
+                return (float(bid) + float(ask)) / 2.0
+        except TypeError:
+            pass
+        return super()._snapshot_price(t)
