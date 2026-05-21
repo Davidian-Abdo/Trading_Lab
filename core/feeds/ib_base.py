@@ -94,6 +94,12 @@ class IBFeed(DataFeed):
 
     def __init__(self, host: str, port: int, client_id: int,
                  account: str = "", market_data_type: int = 3):
+        # MUST happen before `from ib_async import IB`: eventkit (pulled
+        # in by ib_async) calls asyncio.get_event_loop() at import time,
+        # which raises on Python 3.12 from a non-main thread without a
+        # current loop. Calling this here makes IBFeed safe to construct
+        # from any thread regardless of who spawned it.
+        _ensure_event_loop()
         try:
             from ib_async import IB  # noqa: F401
         except ImportError as e:

@@ -38,6 +38,7 @@ Opt-out:
     docker-compose layout where each asset has its own worker container.
 """
 
+import asyncio
 import logging
 import os
 import threading
@@ -64,6 +65,17 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 def _runner(asset: str) -> None:
+    # `ib_async` pulls in `eventkit`, which calls asyncio.get_event_loop()
+    # at MODULE IMPORT TIME. On Python 3.12, get_event_loop() from a
+    # non-main thread without a current loop raises RuntimeError, which
+    # crashes the import before any of our code can install a loop. So
+    # give every worker thread its own fresh loop FIRST — before we touch
+    # anything that might trigger that import chain.
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
     try:
         cfg = load_worker_config_for(asset)
         log.info("[runner:%s] starting in-process worker", asset)
