@@ -1,24 +1,21 @@
-# Single-service deployment. The dashboard process auto-spawns one
-# worker thread per asset (see core/worker_runner.py), so there is no
-# need for separate worker containers and nothing has to be started
-# from a terminal. `docker compose up -d --build` brings up the whole
-# lab; the UI controls everything from there.
+# Two services:
+#   - lab         : the Streamlit dashboard + 3 in-process worker threads
+#                   (crypto/forex/stocks). Crypto talks to Kraken over
+#                   public HTTPS. Forex and stocks talk to the IB
+#                   Gateway container below over the shared compose
+#                   network at `ib-gateway:4002`.
+#   - ib-gateway  : the official Interactive Brokers Gateway + IBC,
+#                   wrapped in the well-known gnzsnz image. Runs in
+#                   PAPER mode, read-only API, never sends real orders.
 #
-# If you want the legacy multi-container layout (one container per
-# asset worker + one for the dashboard), set EMBED_WORKERS=0 below and
-# add per-asset worker services with `command: python -m bots.worker`.
-# That mode is for advanced/distributed deployments only; the default
-# below is the supported path.
+# Compose auto-creates a project network, so `IB_HOST=ib-gateway`
+# resolves via Docker DNS — no extra_hosts needed.
 #
-# Production notes:
-#   - .env.shared (NOT the .example) is loaded by the service. Copy
-#     .env.shared.example -> .env.shared on the VPS, paste credentials,
-#     keep it out of git (already in .gitignore-style intent).
-#   - The dashboard binds to 127.0.0.1 by default. Reach it via
-#     `ssh -L 8501:localhost:8501 user@vps`, OR change the ports line
-#     to "8501:8501" AFTER setting DASHBOARD_PASSWORD and firewalling
-#     the port to your office IP.
-#   - Logs are rotated so a wedged worker thread can't fill the disk.
+# All credentials come from .env.shared (gitignored). Never commit it.
+#
+# Reach the dashboard from your laptop with an SSH tunnel:
+#     ssh -L 8501:localhost:8501 lab@VPS_IP
+#     open http://localhost:8501
 
 x-logging: &default-logging
   driver: json-file
@@ -27,44 +24,114 @@ x-logging: &default-logging
     max-file: "5"
 
 services:
+  # ----------------------------------------------------------------
+  # IB Gateway (PAPER) — Java app + IBC, accessed via TCP from `lab`
+  # ----------------------------------------------------------------
+  ib-gateway:
+    image: ghcr.io/gnzsnz/ib-gateway:stable
+    restart: always
+    env_file: ./.env.shared
+    environment:
+      # Required: your IBKR PAPER login
+      TWS_USERID: ${TWS_USERID}
+      TWS_PASSWORD: ${TWS_PASSWORD}
+      # Always paper for this lab. Switching to "live" requires real
+      # 2FA setup and is intentionally out of scope.
+      TRADING_MODE: paper
+      # Belt-and-braces: the IB API will refuse any order requests,
+      # even if the lab code ever tried to place one (it doesn't).
+      READ_ONLY_API: "yes"
+      # Auto-accept incoming API connections from the `lab` container,
+      # otherwise Gateway pops a click-through dialog every connect.
+      TWS_ACCEPT_INCOMING: accept
+      # Skip the "your version is out of date" nag screen.
+      BYPASS_WARNING: "yes"
+      # Daily soft-restart inside the container, before IBKR's nightly
+      # maintenance window. Format: HH:MM (gateway local time).
+      AUTO_RESTART_TIME: "03:00"
+      # If 2FA ever times out (paper accounts don't trigger this; live
+      # accounts do), exit cleanly so Docker restarts the container
+      # instead of hanging the Gateway process.
+      TWOFA_TIMEOUT_ACTION: exit
+      RELOGIN_AFTER_TWOFA_TIMEOUT: "no"
+      TIME_ZONE: Etc/UTC
+      # VNC for debugging (login dialogs, etc.). If left blank no VNC
+      # server starts. Bound to loopback in the ports section.
+      VNC_SERVER_PASSWORD: ${IB_VNC_PASSWORD:-}
+    ports:
+      # API: paper port only, loopback on the host. The `lab` container
+      # reaches it on the compose network, not via the host port — the
+      # host port is exposed only so you can probe it from the VPS.
+      - "127.0.0.1:4002:4002"
+      # VNC for ad-hoc debugging via SSH tunnel. Comment out if unused.
+      - "127.0.0.1:5900:5900"
+    healthcheck:
+      # bash is present in the gnzsnz image; /dev/tcp probes the port.
+      # start_period covers the full Gateway cold start + IBC login.
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/4002'"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 120s
+    logging: *default-logging
+
+  # ----------------------------------------------------------------
+  # Lab: dashboard + in-process worker threads
+  # ----------------------------------------------------------------
   lab:
-    build: .
+    build:
+      context: .
+      args:
+        # Must match the host user that owns ./data. On the Hetzner VPS
+        # the `lab` user is uid 1000; override here if yours differs.
+        APP_UID: "1000"
+        APP_GID: "1000"
     command: >
       streamlit run dashboard.py
       --server.port 8501
       --server.address 0.0.0.0
       --server.headless true
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    env_file: ./.env.shared
     environment:
-      - DB_PATH=data/results.db
-      - MIN_TRADES=20
-      - WORKER_STALE_SECONDS=600
-      - START_EQUITY=10000
-      - ALLOC_FRACTION=0.5
-      - POLL_SECONDS=60
-      - WORKER_AUTOSTART=true
-      - EMBED_WORKERS=1
-      - CRYPTO_EXCHANGE=kraken
-      - IB_HOST=host.docker.internal
-      - IB_PORT=4002
-      - IB_CLIENT_ID_STOCKS=11
-      - IB_CLIENT_ID_FOREX=12
-      - IB_MARKET_DATA_TYPE=3
-      - IB_CACHE_TTL=120
-      # Recommended: IB historical-data pacing is ~60 req / 10 min.
-      # 60s polling across many symbols/timeframes will trip it.
-      - POLL_SECONDS=300
-      - HOME=/app                                  # <-- add: writable home (chowned to lab)
-      - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
-    env_file: ./.env.shared        # all feed credentials + optional
-                                   # DASHBOARD_PASSWORD live here
+      # Lab settings
+      DB_PATH: data/results.db
+      MIN_TRADES: "20"
+      WORKER_STALE_SECONDS: "600"
+      START_EQUITY: "10000"
+      ALLOC_FRACTION: "0.5"
+      WORKER_AUTOSTART: "true"
+      EMBED_WORKERS: "1"
+      # IB pacing: ~60 historical requests per 10 min per connection.
+      # 60s polling × many symbols × distinct timeframes will trip it.
+      # 300s + the in-feed TTL cache keeps us comfortably under.
+      POLL_SECONDS: "300"
+      # Brokers
+      CRYPTO_EXCHANGE: kraken
+      IB_HOST: ib-gateway              # docker DNS → ib-gateway service
+      IB_PORT: "4002"
+      IB_CLIENT_ID_STOCKS: "11"        # MUST differ from forex clientId
+      IB_CLIENT_ID_FOREX: "12"
+      IB_MARKET_DATA_TYPE: "3"         # 3=delayed (no subscription needed)
+      IB_CACHE_TTL: "120"
+      # Dashboard env (also baked into the Dockerfile but kept here for
+      # explicit visibility / overrideability).
+      HOME: /app
+      STREAMLIT_BROWSER_GATHER_USAGE_STATS: "false"
+    depends_on:
+      ib-gateway:
+        # Wait until IB Gateway's API port is open before starting the
+        # worker threads. Avoids a flurry of "ib connect failed" errors
+        # in the lab logs on first boot. Remove this block if Gateway
+        # is ever flaky and you want the lab up regardless.
+        condition: service_healthy
     restart: always
-    volumes: ["./data:/app/data"]
-    # bind to loopback ONLY by default — use SSH tunnel from your laptop.
-    # To expose publicly, set DASHBOARD_PASSWORD AND change to "8501:8501"
-    # AND firewall the port to your IP.
-    ports: ["127.0.0.1:8501:8501"]
+    volumes:
+      - ./data:/app/data
+    # Bind to loopback ONLY by default — reach via SSH tunnel from your
+    # laptop. To expose publicly set DASHBOARD_PASSWORD in .env.shared,
+    # change this to "8501:8501", and firewall the port to your IP.
+    ports:
+      - "127.0.0.1:8501:8501"
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8501/_stcore/health"]
       interval: 30s

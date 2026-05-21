@@ -1,0 +1,39 @@
+# Keep the build context small and never bake secrets/state into the image.
+
+# VCS
+.git
+.gitignore
+
+# Python build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Virtualenvs (your local Lab_venv etc.)
+.venv/
+venv/
+Lab_venv/
+env/
+
+# Lab state — must be a runtime volume, NOT image content
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Secrets — never copy into an image
+.env
+.env.*
+!.env.shared.example
+
+# Editor / OS noise
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Local docs that aren't needed at runtime (optional — comment out if
+# you want them inside the container for any reason)
+DEPLOYMENT.md
+PATCHES.md
