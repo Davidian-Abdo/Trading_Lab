@@ -55,6 +55,20 @@ CREATE TABLE IF NOT EXISTS symbol_inclusion (
     updated_ts REAL NOT NULL,
     PRIMARY KEY (asset, symbol)
 );
+CREATE TABLE IF NOT EXISTS periods (
+    combo TEXT NOT NULL,
+    asset TEXT NOT NULL,
+    strategy TEXT NOT NULL,
+    behavior TEXT NOT NULL,
+    idx INTEGER NOT NULL,
+    start_ts REAL NOT NULL,
+    end_ts REAL NOT NULL,
+    start_equity REAL NOT NULL,
+    settled_equity REAL,
+    settled_ts REAL,
+    status TEXT NOT NULL,
+    PRIMARY KEY (combo, idx)
+);
 """
 
 INDEXES_SCHEMA = """
@@ -116,6 +130,28 @@ CONTROL_TABLES = {
             "updated_ts": "0",
         },
         "pk": ("asset", "symbol"),
+    },
+    "periods": {
+        "create": (
+            "CREATE TABLE {name} ("
+            "combo TEXT NOT NULL, asset TEXT NOT NULL, "
+            "strategy TEXT NOT NULL, behavior TEXT NOT NULL, "
+            "idx INTEGER NOT NULL, start_ts REAL NOT NULL, "
+            "end_ts REAL NOT NULL, start_equity REAL NOT NULL, "
+            "settled_equity REAL, settled_ts REAL, "
+            "status TEXT NOT NULL, PRIMARY KEY (combo, idx))"
+        ),
+        "columns": ("combo", "asset", "strategy", "behavior", "idx",
+                    "start_ts", "end_ts", "start_equity",
+                    "settled_equity", "settled_ts", "status"),
+        "defaults": {
+            "combo": "''", "asset": "''", "strategy": "''",
+            "behavior": "''", "idx": "0", "start_ts": "0",
+            "end_ts": "0", "start_equity": "0",
+            "settled_equity": "NULL", "settled_ts": "NULL",
+            "status": "'open'",
+        },
+        "pk": ("combo", "idx"),
     },
 }
 
@@ -329,6 +365,37 @@ class ResultsDB:
     def flush(self):
         with self._lock:
             self.conn.commit()
+
+    # ---- test-schedule windows ----------------------------------------
+    def open_period(self, combo, asset, strategy, behavior, idx,
+                    start_ts, end_ts, start_equity):
+        with self._lock:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO periods "
+                "(combo, asset, strategy, behavior, idx, start_ts, end_ts, "
+                "start_equity, settled_equity, settled_ts, status) "
+                "VALUES (?,?,?,?,?,?,?,?,NULL,NULL,'open')",
+                (combo, asset, strategy, behavior, idx,
+                 start_ts, end_ts, start_equity))
+            self.conn.commit()
+
+    def settle_period(self, combo, idx, settled_equity, settled_ts):
+        with self._lock:
+            self.conn.execute(
+                "UPDATE periods SET settled_equity=?, settled_ts=?, "
+                "status='settled' WHERE combo=? AND idx=?",
+                (settled_equity, settled_ts, combo, idx))
+            self.conn.commit()
+
+    def latest_period(self, combo):
+        """Return (idx, start_ts, end_ts, start_equity, status) or None."""
+        with self._lock:
+            cur = self.conn.execute(
+                "SELECT idx, start_ts, end_ts, start_equity, status "
+                "FROM periods WHERE combo=? ORDER BY idx DESC LIMIT 1",
+                (combo,))
+            row = cur.fetchone()
+        return row
 
     # ---- retention (review #8) -----------------------------------------
     def prune(self, keep_days: float = 45.0):

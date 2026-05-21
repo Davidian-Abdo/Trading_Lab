@@ -51,6 +51,7 @@ import logging
 import os
 import sys
 import time
+from datetime import datetime, timezone
 
 from core.config import WorkerConfig
 from core.results import ResultsDB
@@ -72,6 +73,60 @@ log = logging.getLogger("worker")
 # ticks even if the strategy is still long (mitigates "one trailing-stop
 # touch kills a multi-day trend"). Tunable, documented in the README.
 REENTRY_COOLDOWN = int(os.environ.get("REENTRY_COOLDOWN_BARS", "0"))
+
+
+# ---- test-schedule windows --------------------------------------------
+# Each combo runs in fixed-length windows (the "test schedule" axis the
+# spec calls for, 2–4 weeks per composition). At the end of every window
+# the combo is settled: any open position is closed at the last marked
+# price with reason "window_settle", the realized equity is snapshotted
+# into the `periods` table, and the broker resets to start_equity for
+# the next window. This gives the dashboard a clean per-window equity
+# track instead of one open-ended series whose Sharpe is biased by
+# whichever regime happened to be running at "now".
+#
+# Knobs (all env-driven so the dashboard can leave its existing UX alone):
+#   TEST_WINDOW_DAYS  : window length in days (default 14, valid 1..90)
+#   TEST_START_DATE   : ISO date/datetime for window 0's start. Optional.
+#                       If unset, window 0 starts at the FIRST tick the
+#                       combo is observed running (so a fresh install
+#                       just starts a clock).
+#   TEST_END_DATE     : ISO date/datetime to stop scheduling new windows
+#                       after. Optional. After this, the worker keeps
+#                       running but stops opening fresh windows (final
+#                       window settles when its end_ts passes).
+#   MAX_WINDOWS       : hard cap on number of windows per combo. Optional.
+def _parse_iso(s: str):
+    if not s:
+        return None
+    s = s.strip()
+    if not s:
+        return None
+    if "T" not in s and " " not in s:
+        s = s + "T00:00:00+00:00"
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+def _window_days() -> float:
+    raw = os.environ.get("TEST_WINDOW_DAYS", "14").strip() or "14"
+    try:
+        v = float(raw)
+    except ValueError:
+        v = 14.0
+    return max(1.0, min(90.0, v))
+
+
+WINDOW_LEN_SEC = _window_days() * 86400.0
+TEST_START_TS = _parse_iso(os.environ.get("TEST_START_DATE", ""))
+TEST_END_TS = _parse_iso(os.environ.get("TEST_END_DATE", ""))
+_MAX_WINDOWS_RAW = os.environ.get("MAX_WINDOWS", "").strip()
+MAX_WINDOWS = int(_MAX_WINDOWS_RAW) if _MAX_WINDOWS_RAW.isdigit() else None
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -119,6 +174,16 @@ class Combo:
         self.tf = self.strategy.timeframe
         self.lb = self.strategy.lookback
 
+        # ---- test-schedule window state ----
+        # `window_idx` counts how many windows this combo has cycled
+        # through. `window_start_ts`/`window_end_ts` define the window
+        # this combo is CURRENTLY running. Both are None until window 0
+        # is opened (lazily, on the first tick after TEST_START_TS).
+        self.window_idx: int = 0
+        self.window_start_ts: float | None = None
+        self.window_end_ts: float | None = None
+        self.scheduling_done: bool = False  # MAX_WINDOWS / TEST_END_DATE reached
+
         # review #3: resume prior state if present
         prev = db.load_state(self.id)
         if prev:
@@ -126,15 +191,23 @@ class Combo:
             self.current_symbol = prev.get("sym") or None
             self.locked = bool(prev.get("locked", False))
             self.lock_age = int(prev.get("lock_age", 0))
-            log.info("[resume] %s cash=%.2f qty=%.6f sym=%s",
+            self.window_idx = int(prev.get("win_idx", 0))
+            self.window_start_ts = prev.get("win_start") or None
+            self.window_end_ts = prev.get("win_end") or None
+            self.scheduling_done = bool(prev.get("win_done", False))
+            log.info("[resume] %s cash=%.2f qty=%.6f sym=%s win=%d",
                      self.id, self.broker.cash, self.broker.qty,
-                     self.current_symbol)
+                     self.current_symbol, self.window_idx)
 
     def to_full_state(self) -> dict:
         s = self.broker.to_state()
         s["sym"] = self.current_symbol or ""
         s["locked"] = bool(self.locked)
         s["lock_age"] = int(self.lock_age)
+        s["win_idx"] = int(self.window_idx)
+        s["win_start"] = self.window_start_ts
+        s["win_end"] = self.window_end_ts
+        s["win_done"] = bool(self.scheduling_done)
         return s
 
 
@@ -262,9 +335,18 @@ def run_worker(cfg: WorkerConfig):
                     log.info("[worker:%s] data unavailable %s/%s/%s: %s",
                              cfg.asset, sym, tf, lb, e)
 
+            now_ts = time.time()
             for cm in combos:
                 if cm.locked:
                     cm.lock_age += 1
+
+                # test-schedule: settle the active window if its end_ts
+                # has passed, and open the next window (unless capped).
+                _advance_window(cm, now_ts, db)
+                if cm.scheduling_done and not cm.broker.in_position:
+                    # combo is finished its schedule; stop trading but
+                    # keep heartbeating with the saved state.
+                    continue
 
                 # if the position's symbol is no longer included by the
                 # dashboard, close the position at the last marked price
@@ -323,6 +405,85 @@ def run_worker(cfg: WorkerConfig):
         time.sleep(max(1.0, period - (time.time() - tick_started)))
 
 
+def _advance_window(cm: Combo, now_ts: float, db: ResultsDB) -> None:
+    """Open the first window lazily, then on every subsequent tick check
+    whether the active window has expired. On expiry: close any open
+    position (reason="window_settle") at the last marked price, snapshot
+    the realized equity into the `periods` table, reset the broker for
+    the next window, and open the next one — unless we've hit
+    TEST_END_DATE or MAX_WINDOWS.
+    """
+    if cm.scheduling_done:
+        return
+
+    # lazy first-window open: not before TEST_START_TS, and not before
+    # the worker has actually started ticking on this combo.
+    if cm.window_start_ts is None:
+        start = TEST_START_TS if TEST_START_TS is not None else now_ts
+        if now_ts < start:
+            return  # waiting for the scheduled start
+        _open_window(cm, start, db)
+        return
+
+    if now_ts < (cm.window_end_ts or 0):
+        return  # window still running
+
+    # window expired -> settle
+    _settle_window(cm, db)
+
+    # open next window unless capped
+    if MAX_WINDOWS is not None and cm.window_idx >= MAX_WINDOWS:
+        cm.scheduling_done = True
+        return
+    next_start = cm.window_end_ts or now_ts  # contiguous chain
+    if TEST_END_TS is not None and next_start >= TEST_END_TS:
+        cm.scheduling_done = True
+        return
+    _open_window(cm, next_start, db)
+
+
+def _open_window(cm: Combo, start_ts: float, db: ResultsDB) -> None:
+    cm.window_start_ts = start_ts
+    cm.window_end_ts = start_ts + WINDOW_LEN_SEC
+    db.open_period(cm.id, cm.asset, cm.skey, cm.bkey, cm.window_idx,
+                   cm.window_start_ts, cm.window_end_ts,
+                   cm.broker.equity(cm.broker.last or cm.broker.entry
+                                    or cm.broker.start_equity))
+    log.info("[window] %s open idx=%d start=%.0f end=%.0f",
+             cm.id, cm.window_idx, cm.window_start_ts, cm.window_end_ts)
+
+
+def _settle_window(cm: Combo, db: ResultsDB) -> None:
+    """Close any open position with reason="window_settle", snapshot the
+    realized equity, then reset the broker so the next window starts
+    fresh at start_equity (preserves cross-window comparability)."""
+    br = cm.broker
+    held = cm.current_symbol
+    settle_ts = cm.window_end_ts or time.time()
+    settle_price = br.last if br.last > 0 else br.entry
+    if br.in_position and settle_price > 0:
+        q = br.qty
+        br.close(settle_price)
+        db.log_trade(cm.id, cm.asset, held or "", cm.skey, cm.bkey,
+                     "sell", q, settle_price, "window_settle")
+    final_eq = br.equity(settle_price if settle_price > 0 else 0)
+    if held:
+        db.log_equity(cm.id, cm.asset, held, cm.skey, cm.bkey,
+                      final_eq, settle_price or 0.0)
+    db.settle_period(cm.id, cm.window_idx, final_eq, settle_ts)
+    log.info("[window] %s settled idx=%d equity=%.2f",
+             cm.id, cm.window_idx, final_eq)
+
+    # reset broker + combo state for the next window
+    cm.broker = PaperBroker(br.start_equity, br.alloc,
+                            br.cost * 10000.0)
+    cm.behavior.reset()
+    cm.locked = False
+    cm.lock_age = 0
+    cm.current_symbol = None
+    cm.window_idx += 1
+
+
 def _force_close_excluded(cm: Combo, db: ResultsDB, asset: str) -> None:
     """The dashboard removed the symbol this combo is holding. Close at
     the last marked price so equity stops drifting on data we no longer
@@ -359,17 +520,25 @@ def _step_in_position(cm: Combo, cache: dict, db: ResultsDB) -> None:
     # behavior-forced exit. Pass the held symbol's recent closes so
     # ATR-aware behaviors (AtrTrailingStop, ported from the MT5 bot)
     # can size their trailing distance; all other behaviors ignore it.
-    if br.in_position and cm.behavior.should_exit(
-            br.position_state(md.closes)):
+    ps = br.position_state(md.closes)
+    if br.in_position and cm.behavior.should_exit(ps):
         q = br.qty
-        br.close(price)
+        # Fill at the behavior's RESTING-ORDER LEVEL, not the spiked
+        # tick price. Removes the systematic bias where take-profits
+        # captured gap-up overshoot (free money a real limit order
+        # can't keep) and stops paid the gap-down spike — both now
+        # fill at their threshold, symmetric.
+        fill_level = cm.behavior.exit_price(ps)
+        fill = fill_level if (fill_level is not None
+                              and fill_level > 0) else price
+        br.close(fill)
         cm.locked = True
         cm.lock_age = 0
         cm.current_symbol = None
         db.log_trade(cm.id, cm.asset, held_symbol, cm.skey, cm.bkey,
-                     "sell", q, price, "behavior")
+                     "sell", q, fill, "behavior")
         db.log_equity(cm.id, cm.asset, held_symbol, cm.skey, cm.bkey,
-                      br.equity(price), price)
+                      br.equity(fill), fill)
         return
 
     # strategy-driven exit (or stay)

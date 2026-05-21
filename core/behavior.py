@@ -58,6 +58,22 @@ class Behavior(ABC):
     def should_exit(self, ps: PositionState) -> bool:
         ...
 
+    def exit_price(self, ps: PositionState) -> float | None:
+        """Realistic fill price if this behavior triggered an exit on the
+        current tick.
+
+        Returning None means "fill at last_price" (the default — what the
+        worker did before this method existed). Returning a number means
+        "a real resting order at this level would have filled here". This
+        removes the bias where a tick that GAPPED above a take-profit
+        level filled at the spiked price (capturing free overshoot a real
+        limit order can't get), while a tick that gapped below a hard /
+        trailing stop also filled at the spiked-down price (paying the
+        worst of the gap). Both now fill at their resting-order level,
+        symmetrically.
+        """
+        return None
+
 
 class NoBehavior(Behavior):
     name = "none"
@@ -82,14 +98,22 @@ class TrailingStop(Behavior):
         self.name = (f"trail{pct:g}" if activate_pct == 0
                      else f"trail{pct:g}a{activate_pct:g}")
 
+    def _stop_level(self, ps: PositionState) -> float:
+        return ps.high_water * (1.0 - self.pct / 100.0)
+
     def should_exit(self, ps: PositionState) -> bool:
         if ps.entry_price <= 0 or ps.high_water <= 0:
             return False
         gain_to_high = (ps.high_water - ps.entry_price) / ps.entry_price * 100.0
         if gain_to_high < self.activate_pct:
             return False                      # trail not armed yet
-        drop = (ps.high_water - ps.last_price) / ps.high_water * 100.0
-        return drop >= self.pct
+        return ps.last_price <= self._stop_level(ps)
+
+    def exit_price(self, ps: PositionState) -> float | None:
+        if ps.entry_price <= 0 or ps.high_water <= 0:
+            return None
+        # Fill at the stop level, not the gapped-down tick price.
+        return self._stop_level(ps)
 
 
 def _atr_from_closes(closes: List[float], period: int) -> float:
@@ -158,17 +182,29 @@ class AtrTrailingStop(Behavior):
             self._stop = candidate            # ratchet up only
         return ps.last_price <= self._stop
 
+    def exit_price(self, ps: PositionState) -> float | None:
+        # Fill at the (ratcheted) stop level set in should_exit, not at
+        # the gapped-down tick. Symmetric with TakeProfit.
+        return self._stop
+
 
 class HardStop(Behavior):
     def __init__(self, pct: float = 3.0):
         self.pct = pct
         self.name = f"stop{pct:g}"
 
+    def _stop_level(self, ps: PositionState) -> float:
+        return ps.entry_price * (1.0 - self.pct / 100.0)
+
     def should_exit(self, ps: PositionState) -> bool:
         if ps.entry_price <= 0:
             return False
-        loss = (ps.entry_price - ps.last_price) / ps.entry_price * 100.0
-        return loss >= self.pct
+        return ps.last_price <= self._stop_level(ps)
+
+    def exit_price(self, ps: PositionState) -> float | None:
+        if ps.entry_price <= 0:
+            return None
+        return self._stop_level(ps)
 
 
 class TakeProfit(Behavior):
@@ -176,11 +212,20 @@ class TakeProfit(Behavior):
         self.pct = pct
         self.name = f"tp{pct:g}"
 
+    def _tp_level(self, ps: PositionState) -> float:
+        return ps.entry_price * (1.0 + self.pct / 100.0)
+
     def should_exit(self, ps: PositionState) -> bool:
         if ps.entry_price <= 0:
             return False
-        gain = (ps.last_price - ps.entry_price) / ps.entry_price * 100.0
-        return gain >= self.pct
+        return ps.last_price >= self._tp_level(ps)
+
+    def exit_price(self, ps: PositionState) -> float | None:
+        if ps.entry_price <= 0:
+            return None
+        # Fill at TP, not the spiked-up tick. A real resting limit order
+        # at TP would have filled exactly here.
+        return self._tp_level(ps)
 
 
 class Composite(Behavior):
@@ -197,6 +242,22 @@ class Composite(Behavior):
     def should_exit(self, ps: PositionState) -> bool:
         return any(c.should_exit(ps) for c in self.children)
 
+    def exit_price(self, ps: PositionState) -> float | None:
+        """Pick the price of whichever child actually triggered. If more
+        than one fired (e.g. a tick that gapped past both TP and SL),
+        choose the WORSE outcome — that matches what a stop+limit pair
+        on a real exchange would do: the stop would arm first on the
+        adverse spike. With our same-tick model we approximate by taking
+        the lower (more conservative) fill for a long position."""
+        triggered = [c for c in self.children if c.should_exit(ps)]
+        if not triggered:
+            return None
+        prices = [c.exit_price(ps) for c in triggered]
+        prices = [p for p in prices if p is not None]
+        if not prices:
+            return None
+        return min(prices)
+
 
 class AllOf(Behavior):
     """Exit only if ALL children say exit (AND)."""
@@ -211,3 +272,10 @@ class AllOf(Behavior):
 
     def should_exit(self, ps: PositionState) -> bool:
         return all(c.should_exit(ps) for c in self.children)
+
+    def exit_price(self, ps: PositionState) -> float | None:
+        prices = [c.exit_price(ps) for c in self.children]
+        prices = [p for p in prices if p is not None]
+        if not prices:
+            return None
+        return min(prices)

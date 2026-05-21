@@ -46,7 +46,36 @@ _DUR = {
     "30m": "20 D", "1h": "30 D", "4h": "60 D", "1d": "1 Y",
 }
 
-_CACHE_TTL = float(os.environ.get("IB_CACHE_TTL", "120"))
+# Per-timeframe minimum cache TTL in seconds. Re-fetching the same
+# (symbol, timeframe, lookback) inside its bar window cannot yield new
+# information — the most recent COMPLETE bar is the same — and instead
+# burns one IB historical-data request against the ~60-per-10-min hard
+# limit. So the cache TTL must be at least one bar long; longer is fine
+# (a paper *comparison* lab gains nothing from a faster refresh than the
+# bar itself). With the default POLL_SECONDS=60 and 12 stock symbols on
+# a 5m timeframe, this drops historical requests per minute from ~24
+# (cold cache every poll) to ~2.4 (one per symbol per bar), well under
+# IB's 6/min sustained budget.
+_TIMEFRAME_MIN_TTL = {
+    "1m":   60.0,
+    "5m":  300.0,
+    "15m": 900.0,
+    "30m": 1800.0,
+    "1h":  3600.0,
+    "4h":  14400.0,
+    "1d":  86400.0,
+}
+
+_BASE_CACHE_TTL = float(os.environ.get("IB_CACHE_TTL", "0") or 0)
+_POLL_SECONDS = float(os.environ.get("POLL_SECONDS", "60") or 60)
+
+
+def _cache_ttl_for(timeframe: str) -> float:
+    """Resolve the effective TTL: max(IB_CACHE_TTL override, poll interval,
+    timeframe-based floor). Ensures we never refresh faster than one bar,
+    and never refresh more than once per poll."""
+    floor = _TIMEFRAME_MIN_TTL.get(timeframe, 300.0)
+    return max(_BASE_CACHE_TTL, _POLL_SECONDS, floor)
 
 
 def _ensure_event_loop():
@@ -117,9 +146,10 @@ class IBFeed(DataFeed):
     def get_market_data(self, symbol, timeframe, lookback) -> MarketData:
         key = (symbol, timeframe, lookback)
         now = time.time()
+        ttl = _cache_ttl_for(timeframe)
         with self._lock:
             cached = self._cache.get(key)
-            if cached and (now - cached[0]) < _CACHE_TTL:
+            if cached and (now - cached[0]) < ttl:
                 return cached[1]
 
             try:

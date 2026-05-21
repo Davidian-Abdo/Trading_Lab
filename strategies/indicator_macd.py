@@ -122,7 +122,7 @@ class IndicatorMacd(Strategy):
             and X1 < X2 and X2 < X3,
 
             ema_fast < ema_slow and X1 < Y1 and X2 < Y2 and X3 > Y3
-            and X1 > X2 and X2 < X3,
+            and X1 < X2 and X2 < X3,
 
         ]
 
@@ -158,7 +158,7 @@ def _rsi_series(values, period=14):
 class IndicatorMacdRsi(Strategy):
     name = "indicator_macd_rsi"
     timeframe = "5m"
-    lookback = 160          # >= slow_ema(44) + macd_slow(26) + signal(9) + buffer
+    lookback = 160          # >= slow_ema(44) + RSI + buffer
     interval = 60
 
     def __init__(self, fast_ema=15, slow_ema=44,
@@ -169,7 +169,7 @@ class IndicatorMacdRsi(Strategy):
 
     def decide(self, md: MarketData, position: float) -> str:
         c = md.closes
-        need = max(self.slow_ema, self.macd_slow) + self.macd_signal + 5
+        need = self.slow_ema + self.rsi_period + 5
         if len(c) < need:
             return "hold"
 

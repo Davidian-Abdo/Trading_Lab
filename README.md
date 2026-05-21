@@ -1,6 +1,6 @@
 What is
-each bot to run all four strategies across all three asset classes separately, so they can compare how each strategy performs within crypto, within forex, and within stocks individually. It's not about spreading strategies across different bots, but rather testing the full strategy suite against each market type to identify which approaches work best for each.
-And beyond just the strategies themselves, execution behaviors like trailing stops versus fixed stops are another configurable layer that should also vary by asset class, since what works as a risk management approach in one market might not suit another. The practical constraint: running 4 strategies × 3 behaviors × 3 asset classes means 36 combos that all need to share venue connections (crypto via Binance Spot Testnet, forex via OANDA, stocks via Alpaca) without their equity tracks colliding inside a single demo account.
+each bot to run all five strategies across all three asset classes separately, so they can compare how each strategy performs within crypto, within forex, and within stocks individually. It's not about spreading strategies across different bots, but rather testing the full strategy suite against each market type to identify which approaches work best for each.
+And beyond just the strategies themselves, execution behaviors like trailing stops versus fixed stops are another configurable layer that should also vary by asset class, since what works as a risk management approach in one market might not suit another. The practical constraint: running 5 strategies × 3 behaviors × 3 asset classes means 45 combos that all need to share venue connections (crypto via Kraken spot, forex via Interactive Brokers paper, stocks via Interactive Brokers paper) without their equity tracks colliding inside a single demo account.
 
 1. Strategy × Behavior × Asset
 A system that runs every strategy, under every execution behavior, on
@@ -11,7 +11,7 @@ whether behaviors like a trailing stop help or hurt per asset.
 Written for someone who knows Python but is new to trading. Demo only.
 Not investment advice.
 
-Not "4 bots = 4 strategies, one asset each."
+Not "5 bots = 5 strategies, one asset each."
 a matrix. Each strategy is tested on crypto AND forex
 AND stocks, so you can conclude "trend works on crypto but not forex."
 Plus a dimension for behaviors. A strategy decides direction; a
@@ -23,13 +23,24 @@ kind of thing you want to discover.
 
 So the experiment is the cartesian product:
 
-   STRATEGIES   ×   BEHAVIORS        ×   ASSET CLASSES
-   (sma,             (tp,                 (crypto,
-    rsi,              tp_sl,               forex,
-    breakout,         tp_trail)            stocks)
+   STRATEGIES        ×   BEHAVIORS        ×   ASSET CLASSES
+   (sma,                  (tp,                 (crypto,
+    rsi,                   tp_sl,               forex,
+    indicator_MACD,        tp_trail)            stocks)
+    indicator_RSI,
     momentum)
-   = 4            ×   3                ×   3   = 36 combinations TOTAL
-   = 12 per asset (each scans a configurable list of symbols)
+   = 5                ×   3                ×   3   = 45 combinations TOTAL
+   = 15 per asset (each scans a configurable list of symbols)
+
+The experiment also has a TEST-SCHEDULE axis: every combo runs in
+fixed-length windows (default 14 days, configurable via TEST_WINDOW_DAYS
+in `.env.shared`, valid range 1–90). At the end of each window the
+combo is settled — any open position closes at the last marked price
+with reason `window_settle`, realized equity is snapshotted into the
+`periods` table, and the broker resets to start_equity for the next
+window. This gives you per-window Sharpe / drawdown that is robust to
+"whichever regime was running at now"; the dashboard pivot reads
+straight off those settled rows.
 
 The three behaviors:
   - tp        : take-profit only, no stop-loss. Lets winners run all
@@ -48,9 +59,9 @@ over the same position (the exchange shows one net position per symbol)
 and per-combo profit attribution would be impossible.
 
 So every combination has its own internal paper account. The system
-pulls real live market data from each venue — including the official
-Binance Spot Testnet demo account for crypto — but simulates fills
-internally per combo. This means:
+pulls real live market data from each venue — Kraken's public spot
+market for crypto, IB Gateway (paper account) for forex and stocks —
+but simulates fills internally per combo. This means:
 
 Perfect, isolated P&L attribution per (strategy × behavior × asset).
 Unlimited combinations with no extra accounts and no collisions.
@@ -86,20 +97,20 @@ portfolio), that's a separate, bigger change.
 2. Architecture
             ┌──────────────── ONE cheap Linux VPS ─────────────────┐
             │                                                       │
- live data  │  worker-crypto ─ Binance TESTNET (BTC,ETH,SOL) ┐      │
- (real      │     └ 12 (strat×beh) combos, each SCANS all    │      │
-  prices)   │       3 symbols, holds 1 position max          │      │
-            │  worker-forex  ─ fetch EUR_USD,GBP_USD,…    ── ┼──▶ results.db
-            │     └ 12 combos, each scans all forex syms     │   (SQLite)
-            │  worker-stocks ─ fetch SPY,QQQ,AAPL each ──── ─┘      │
-            │     └ 12 combos, each scans all stocks syms     ▼     │
+ live data  │  worker-crypto ─ Kraken spot (BTC,ETH,SOL,…) ──┐      │
+ (real      │     └ 15 (strat×beh) combos, each SCANS all    │      │
+  prices)   │       crypto symbols, holds 1 position max     │      │
+            │  worker-forex  ─ IB Gateway paper (EUR_USD,…) ─┼──▶ results.db
+            │     └ 15 combos, each scans all forex syms     │   (SQLite)
+            │  worker-stocks ─ IB Gateway paper (SPY,QQQ,…) ─┘      │
+            │     └ 15 combos, each scans all stocks syms     ▼     │
             │  each combo = its own PaperBroker        dashboard:8501│
-            │  3 processes total, restart:always     (per-asset pivot│
-            │                                         + live position│
+            │  3 worker THREADS in one container     (per-asset pivot│
+            │  restart:always                         + live position│
             │                                          table)        │
             └───────────────────────────────────────────────────────┘
 File	Role
-core/feed.py + core/feeds/*	Data per asset (crypto=Binance Spot Testnet via ccxt, forex=OANDA, stocks=Alpaca)
+core/feed.py + core/feeds/*	Data per asset (crypto=Kraken via ccxt, forex=IBKR paper, stocks=IBKR paper)
 core/strategy.py, strategies/*	Direction logic (want long / flat) — symbol-agnostic
 core/behavior.py	The behavior axis: TakeProfit, HardStop, TrailingStop, Composite, AllOf
 core/paper.py	One isolated simulated account per combo, with per-asset cost in bps
@@ -135,18 +146,17 @@ The lab ships with a master AVAILABLE list of symbols per asset (see
 ASSETS in core/matrix.py). The dashboard shows that master list as
 checkboxes per asset; you pick the subset each worker actually fetches
 and scans. Defaults (all available, included):
-  crypto -> BTC/USDT, ETH/USDT, SOL/USDT, BNB/USDT, XRP/USDT,
-            ADA/USDT, DOGE/USDT, LTC/USDT     (Binance testnet pairs)
+  crypto -> BTC/USDT, ETH/USDT, SOL/USDT, DOT/USDT, XRP/USDT,
+            ADA/USDT, DOGE/USDT, LTC/USDT     (Kraken spot pairs)
   forex  -> EUR_USD, GBP_USD, USD_JPY, AUD_USD, USD_CAD, USD_CHF,
             NZD_USD, EUR_GBP
   stocks -> SPY, QQQ, AAPL, MSFT, GOOGL, AMZN, NVDA, TSLA
-Combo count per asset = 4 strategies x 3 behaviors = 12. The symbols
+Combo count per asset = 5 strategies x 3 behaviors = 15. The symbols
 list is NOT a new dimension — each combo continuously scans every
 selected symbol for the next entry (see section 1b). Add new tickers
 to ASSETS[asset]["available_symbols"] in core/matrix.py and they show
 up as a new checkbox next dashboard load. For crypto, confirm any new
-ticker exists on testnet.binance.vision first — testnet has a smaller
-symbol universe than production Binance.
+ticker exists on kraken.com first.
 
 cd trading-lab
 python -m venv .venv
@@ -161,8 +171,10 @@ python selftest.py            # must end with "ALL GOOD"
 #   per regime. That is exactly what you set out to measure.
 
 # 4.2 Real credentials
-cp .env.shared.example .env.shared   # edit: Binance testnet + OANDA +
-                                     # Alpaca (+ optional Telegram)
+cp .env.shared.example .env.shared   # edit: Kraken keys (optional) +
+                                     # IBKR paper (IB_HOST/PORT/clientIds)
+                                     # + optional Telegram + test-schedule
+                                     # (TEST_WINDOW_DAYS, TEST_START_DATE)
 #   (.env.shared is gitignored. NEVER commit real keys.)
 
 # 4.3 Start the lab (single command, no separate worker terminals)
@@ -364,7 +376,7 @@ Per-asset cost assumptions (core/matrix.py → ASSETS) materially
 change who wins. They are explicit on purpose — tune them honestly;
 optimistic costs manufacture fake winners.
 The honest caveat (unchanged and important): running a big matrix and
-picking the top cell is the textbook multiple-testing trap — with 36
+picking the top cell is the textbook multiple-testing trap — with 45
 combos, some will look great by luck. A leader here is a hypothesis.
 Before it becomes "my final strategy": check it leads across sub-periods,
 beats the others by more than noise, and then re-confirm it over a fresh
@@ -404,17 +416,17 @@ warning sign, not error messages.
 trading-lab/
 ├── core/
 │   ├── feed.py            # data interface + MarketData
-│   ├── feeds/             # crypto (Binance testnet via ccxt) / forex (oanda) / stocks (alpaca)
+│   ├── feeds/             # crypto (Kraken via ccxt) / forex (IBKR paper) / stocks (IBKR paper)
 │   ├── strategy.py        # strategy base class
-│   ├── strategies? -> ../strategies/  (4 strategies)
-│   ├── behavior.py        # THE behavior axis (TakeProfit, HardStop, TrailingStop, Composite)
+│   ├── strategies? -> ../strategies/  (5 strategies)
+│   ├── behavior.py        # THE behavior axis (TakeProfit, HardStop, TrailingStop, AtrTrailingStop, Composite)
 │   ├── paper.py           # isolated paper account per combo
 │   ├── matrix.py          # the experiment definition (edit me)
-│   ├── worker.py          # one worker per asset = whole matrix for it
-│   ├── results.py         # shared tagged SQLite
+│   ├── worker.py          # one worker per asset = whole matrix for it; also enforces test-schedule windows
+│   ├── results.py         # shared tagged SQLite (equity / trades / periods)
 │   ├── config.py          # per-worker env config
 │   └── alerts.py          # telegram + heartbeat
-├── strategies/            # sma / rsi / breakout / momentum
+├── strategies/            # sma / rsi / indicator_macd / indicator_rsi / momentum
 ├── bots/worker.py         # legacy single-asset entrypoint (advanced)
 ├── core/worker_runner.py  # in-dashboard supervisor (default path)
 ├── dashboard.py           # per-asset pivot cockpit
