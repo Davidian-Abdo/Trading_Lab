@@ -11,14 +11,16 @@ configured symbol for its asset class and trades whichever one signals
 first. The combo holds AT MOST one position at a time — see worker.py
 for the scan/enter/exit logic.
 
-So the combo count per asset is STRATEGIES x BEHAVIORS = 4 x 3 = 12
+So the combo count per asset is STRATEGIES x BEHAVIORS = 5 x 3 = 15
 (not multiplied by symbols). Adding symbols deepens the search a combo
 performs each tick; it does NOT split P&L attribution across symbols.
 
 CHANGES vs. the original lab (porting from the previous MT5 bot):
-  - The `breakout` strategy has been REPLACED by `indicator`
-    (strategies/indicator_macd_rsi.py) — the EMA/MACD/RSI confirmation
-    logic ported 1:1 from the previous bot's check_signals().
+  - The `breakout` strategy has been REPLACED by two split-out indicator
+    strategies — `indicator_MACD` (strategies/indicator_macd.py, EMA +
+    MACD) and `indicator_RSI` (strategies/indicator_rsi.py, EMA + RSI).
+    Both are 1:1 ports of the previous bot's `check_signals()`, separated
+    so the matrix can credit each indicator family independently.
   - The `tp_trail` behavior now uses AtrTrailingStop (ATR-scaled
     trailing distance, ratchets up, never loosens) instead of the
     fixed-percentage TrailingStop — the previous bot's
@@ -41,9 +43,10 @@ from core.behavior import (AtrTrailingStop, TrailingStop, HardStop,
 
 
 # ---- factories so each combo gets a FRESH instance -----------------------
-# Four strategies — one trend (sma), one mean-reversion (rsi), one
-# momentum (momentum), and the ported multi-indicator confirmation
-# strategy (indicator: EMA + MACD + RSI) that replaced the old breakout.
+# Five strategies — one trend (sma), one mean-reversion (rsi), one
+# momentum (momentum), and TWO ported multi-indicator confirmation
+# strategies (indicator_MACD: EMA + MACD, indicator_RSI: EMA + RSI) that
+# replaced the old breakout.
 STRATEGIES = {
     "sma":       lambda: SmaCrossover(fast=10, slow=30),
     "rsi":       lambda: RsiMeanRev(period=14, oversold=30, exit_level=50),

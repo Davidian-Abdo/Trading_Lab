@@ -30,14 +30,14 @@ services:
   ib-gateway:
     image: ghcr.io/gnzsnz/ib-gateway:stable
     restart: always
+    # env_file passes TWS_USERID / TWS_PASSWORD / VNC_SERVER_PASSWORD
+    # from .env.shared straight into the container — those names match
+    # what the gnzsnz image expects, so no environment: remapping is
+    # needed. (`${VAR}` interpolation inside this YAML would read from
+    # the shell or a `.env` file in the project dir, NOT from env_file,
+    # so the previous interpolation silently set them to empty.)
     env_file: ./.env.shared
     environment:
-      # Required: your IBKR PAPER login. The gnzsnz image expects
-      # TWS_USERID / TWS_PASSWORD; the lab's .env.shared uses the
-      # IB_USERID / IB_PASSWORD naming consistent with the IB_* prefix
-      # used everywhere else, so we remap here.
-      TWS_USERID: ${IB_USERID}
-      TWS_PASSWORD: ${IB_PASSWORD}
       # Always paper for this lab. Switching to "live" requires real
       # 2FA setup and is intentionally out of scope.
       TRADING_MODE: paper
@@ -58,9 +58,9 @@ services:
       TWOFA_TIMEOUT_ACTION: exit
       RELOGIN_AFTER_TWOFA_TIMEOUT: "no"
       TIME_ZONE: Etc/UTC
-      # VNC for debugging (login dialogs, etc.). If left blank no VNC
-      # server starts. Bound to loopback in the ports section.
-      VNC_SERVER_PASSWORD: ${IB_VNC_PASSWORD:-}
+      # VNC password (VNC_SERVER_PASSWORD) comes through env_file. If
+      # left blank in .env.shared the gnzsnz image just skips starting
+      # the VNC server. Bound to loopback in the ports section.
     ports:
       # API: paper port only, loopback on the host. The `lab` container
       # reaches it on the compose network, not via the host port — the

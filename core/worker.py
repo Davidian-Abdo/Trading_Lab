@@ -56,7 +56,7 @@ from datetime import datetime, timezone
 from core.config import WorkerConfig
 from core.results import ResultsDB
 from core.feed import FeedUnavailable
-from core.matrix import (STRATEGIES, BEHAVIORS, ASSETS, asset_symbols,
+from core.matrix import (STRATEGIES, BEHAVIORS, ASSETS,
                          available_symbols, build_combos, combo_id)
 from core.paper import PaperBroker
 from core.alerts import alert, heartbeat

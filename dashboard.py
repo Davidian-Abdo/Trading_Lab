@@ -42,7 +42,7 @@ try:
 except Exception:
     pass
 
-from core.matrix import (ASSETS, STRATEGIES, BEHAVIORS, asset_symbols,
+from core.matrix import (ASSETS, STRATEGIES, BEHAVIORS,
                          available_symbols)
 from core.results import ResultsDB
 from core.worker_runner import ensure_workers_started, runner_status

@@ -78,6 +78,11 @@ class PaperBroker:
         self.high = price
         self.low = price
         self.bars = 0
+        # Invariant: in_position => last > 0. Without this, a force-close
+        # path that fires before the next mark() (e.g. the dashboard
+        # excluding the symbol mid-tick) would see last=0 and skip the
+        # close, orphaning the position.
+        self.last = price
 
     def close(self, price: float) -> None:
         if not self.in_position or price <= 0:

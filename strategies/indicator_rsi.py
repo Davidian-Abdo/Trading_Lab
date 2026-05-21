@@ -1,7 +1,11 @@
 """
-strategies/indicator_rsi.py  -- EMA / MACD / RSI CONFIRMATION
+strategies/indicator_rsi.py  -- EMA / RSI CONFIRMATION
 
-Ported from the previous MetaTrader5 bot's `check_signals()`.
+Ported from the previous MetaTrader5 bot's `check_signals()`. The
+original bot combined EMA + MACD + RSI signals in one decision; the lab
+splits that into two stand-alone strategies (this one and
+strategies/indicator_macd.py) so the matrix can credit each indicator
+family independently.
 
 The original lived in a live MT5 bot that pulled OHLC via `mt5.copy_rates`
 and computed indicators with the `ta` library. The lab's feed contract
@@ -10,12 +14,12 @@ stateless decision functions derived solely from `md.closes` (no hidden
 globals, no `ta` dependency, offline-testable). So the indicators are
 re-implemented here in plain Python, keeping the SAME decision logic:
 
-  - EMA fast (15) vs EMA slow (44)            -> regime / trend filter
-  - MACD(12,26,9) line vs signal, last 3 bars -> momentum cross logic
-  - RSI(14), last 3 bars                      -> momentum direction
+  - EMA fast (15)  vs EMA slow (44)           -> short-horizon trend
+  - EMA fast (50)  vs EMA slow (180)          -> long-horizon regime
+  - RSI(14), last 3 bars + 66/35 thresholds   -> momentum direction
 
-The six condition sets (3 buy, 3 sell) are a faithful translation of the
-previous bot's `buy_conditions` / `sell_conditions` lists.
+The condition sets are a faithful translation of the previous bot's
+`buy_conditions` / `sell_conditions` lists.
 
 NOTE ON TIMEFRAME / MULTI-TIMEFRAME:
 The previous bot ran this on M3 and additionally required a 2-of-N
@@ -102,8 +106,8 @@ class IndicatorRsi(Strategy):
         if any(v is None for v in needed):
             return "hold"
 
-        ema_fast, ema_slow = ef[-1], es[-1]  
-        big_ema_fast, big_ema_slow = big_ef[-1], big_es[-1]      # macd signal
+        ema_fast, ema_slow = ef[-1], es[-1]
+        big_ema_fast, big_ema_slow = big_ef[-1], big_es[-1]
         Z1, Z2, Z3 = rsi[-1], rsi[-2], rsi[-3]         # rsi
 
         # ---- ported 1:1 from the MT5 bot's check_signals() ------------
