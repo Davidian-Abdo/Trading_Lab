@@ -3,13 +3,14 @@
 #                   (crypto/forex/stocks). Crypto talks to Kraken over
 #                   public HTTPS. Forex and stocks talk to the IB
 #                   Gateway container below over the shared compose
-#                   network at `ib-gateway:4002`.
+#                   network at `ib-gateway:4004` (gnzsnz's socat paper
+#                   API port).
 #   - ib-gateway  : the official Interactive Brokers Gateway + IBC,
 #                   wrapped in the well-known gnzsnz image. Runs in
 #                   PAPER mode, read-only API, never sends real orders.
 #
 # Compose auto-creates a project network, so `IB_HOST=ib-gateway`
-# resolves via Docker DNS — no extra_hosts needed.
+# resolves via Docker DNS. No extra_hosts or pinned container IPs needed.
 #
 # All credentials come from .env.shared (gitignored). Never commit it.
 #
@@ -25,17 +26,16 @@ x-logging: &default-logging
 
 services:
   # ----------------------------------------------------------------
-  # IB Gateway (PAPER) — Java app + IBC, accessed via TCP from `lab`
+  # IB Gateway (PAPER) - Java app + IBC, accessed via TCP from `lab`
   # ----------------------------------------------------------------
   ib-gateway:
     image: ghcr.io/gnzsnz/ib-gateway:stable
     restart: always
     # env_file passes TWS_USERID / TWS_PASSWORD / VNC_SERVER_PASSWORD
-    # from .env.shared straight into the container — those names match
-    # what the gnzsnz image expects, so no environment: remapping is
+    # from .env.shared straight into the container. Those names match
+    # what the gnzsnz image expects, so no environment remapping is
     # needed. (`${VAR}` interpolation inside this YAML would read from
-    # the shell or a `.env` file in the project dir, NOT from env_file,
-    # so the previous interpolation silently set them to empty.)
+    # the shell or a `.env` file in the project dir, NOT from env_file.)
     env_file: ./.env.shared
     environment:
       # Always paper for this lab. Switching to "live" requires real
@@ -44,45 +44,39 @@ services:
       # Belt-and-braces: the IB API will refuse any order requests,
       # even if the lab code ever tried to place one (it doesn't).
       READ_ONLY_API: "yes"
-      # Auto-accept incoming API connections from the `lab` container,
-      # otherwise Gateway pops a click-through dialog every connect.
+      # Auto-accept incoming API connection dialogs if they appear.
       TWS_ACCEPT_INCOMING: accept
       # Skip the "your version is out of date" nag screen.
       BYPASS_WARNING: "yes"
       # Daily soft-restart inside the container, before IBKR's nightly
-      # maintenance window. Format: HH:MM (gateway local time).
-      AUTO_RESTART_TIME: "03:00"
+      # maintenance window. IBC expects HH:MM AM/PM.
+      AUTO_RESTART_TIME: "03:00 AM"
       # If 2FA ever times out (paper accounts don't trigger this; live
       # accounts do), exit cleanly so Docker restarts the container
       # instead of hanging the Gateway process.
       TWOFA_TIMEOUT_ACTION: exit
       RELOGIN_AFTER_TWOFA_TIMEOUT: "no"
       TIME_ZONE: Etc/UTC
-      # API trust list (written into jts.ini at boot). Gateway's API
-      # accepts TCP from anywhere, but it CLOSES the API session right
-      # after the handshake unless the source IP appears here. The
-      # default is "127.0.0.1" only, which kills connections from the
-      # `lab` container (which talks to us across the compose bridge
-      # network, not loopback). The static IP below is pinned via the
-      # `labnet` network so this list stays valid across restarts.
-      TRUSTED_IPS: "127.0.0.1,172.28.0.10"
+      # The gnzsnz image keeps IB Gateway itself bound/trusted on
+      # loopback and publishes paper API access through socat on
+      # container port 4004. `lab` must connect to that socat port, not
+      # Gateway's internal 4002.
       # VNC password (VNC_SERVER_PASSWORD) comes through env_file. If
       # left blank in .env.shared the gnzsnz image just skips starting
       # the VNC server. Bound to loopback in the ports section.
     networks:
-      labnet:
-        ipv4_address: 172.28.0.11
+      - labnet
     ports:
-      # API: paper port only, loopback on the host. The `lab` container
-      # reaches it on the compose network, not via the host port — the
-      # host port is exposed only so you can probe it from the VPS.
-      - "127.0.0.1:4002:4002"
+      # API: expose host 4002 to the gnzsnz paper socat port 4004.
+      # `lab` reaches the same socat listener as ib-gateway:4004 on the
+      # compose network; the host binding is only for local probes.
+      - "127.0.0.1:4002:4004"
       # VNC for ad-hoc debugging via SSH tunnel. Comment out if unused.
       - "127.0.0.1:5900:5900"
     healthcheck:
-      # bash is present in the gnzsnz image; /dev/tcp probes the port.
+      # Probe the same paper socat port that clients should use.
       # start_period covers the full Gateway cold start + IBC login.
-      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/4002'"]
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/4004'"]
       interval: 30s
       timeout: 5s
       retries: 5
@@ -116,17 +110,22 @@ services:
       WORKER_AUTOSTART: "true"
       EMBED_WORKERS: "1"
       # IB pacing: ~60 historical requests per 10 min per connection.
-      # 60s polling × many symbols × distinct timeframes will trip it.
+      # 60s polling x many symbols x distinct timeframes will trip it.
       # 300s + the in-feed TTL cache keeps us comfortably under.
       POLL_SECONDS: "300"
       # Brokers
       CRYPTO_EXCHANGE: kraken
-      IB_HOST: ib-gateway              # docker DNS → ib-gateway service
-      IB_PORT: "4002"
+      IB_HOST: ib-gateway              # docker DNS -> ib-gateway service
+      IB_PORT: "4004"                  # gnzsnz paper socat port
       IB_CLIENT_ID_STOCKS: "11"        # MUST differ from forex clientId
       IB_CLIENT_ID_FOREX: "12"
       IB_MARKET_DATA_TYPE: "3"         # 3=delayed (no subscription needed)
       IB_CACHE_TTL: "120"
+      # These are only for the gateway service. Blank them here so the
+      # dashboard/worker container does not carry login credentials it
+      # never reads.
+      TWS_USERID: ""
+      TWS_PASSWORD: ""
       # Dashboard env (also baked into the Dockerfile but kept here for
       # explicit visibility / overrideability).
       HOME: /app
@@ -141,16 +140,13 @@ services:
     restart: always
     volumes:
       - ./data:/app/data
-    # Bind to loopback ONLY by default — reach via SSH tunnel from your
+    # Bind to loopback ONLY by default - reach via SSH tunnel from your
     # laptop. To expose publicly set DASHBOARD_PASSWORD in .env.shared,
     # change this to "8501:8501", and firewall the port to your IP.
     ports:
       - "127.0.0.1:8501:8501"
     networks:
-      labnet:
-        # Pinned IP so it appears in Gateway's TRUSTED_IPS list above.
-        # Both addresses sit inside the `labnet` /24 below.
-        ipv4_address: 172.28.0.10
+      - labnet
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8501/_stcore/health"]
       interval: 30s
@@ -160,13 +156,9 @@ services:
     logging: *default-logging
 
 
-# Dedicated bridge network with a pinned subnet so the lab and gateway
-# containers get STABLE IPs across restarts. Without this, docker compose
-# assigns IPs from its default pool, which would invalidate the
-# TRUSTED_IPS list every time the project network was recreated.
+# Dedicated bridge network. Docker DNS gives `lab` a stable service name
+# for the Gateway container, and gnzsnz's socat listener handles the
+# loopback-only IB Gateway API constraint.
 networks:
   labnet:
     driver: bridge
-    ipam:
-      config:
-        - subnet: 172.28.0.0/24

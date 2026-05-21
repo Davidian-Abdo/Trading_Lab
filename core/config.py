@@ -61,8 +61,10 @@ class WorkerConfig:
     # Connect to a running IB Gateway / TWS. clientId is resolved
     # PER ASSET (stocks vs forex) so the two workers don't collide.
     ib_host: str = "127.0.0.1"
-    ib_port: int = 4002                       # 4002=Gateway paper,
-                                              # 7497=TWS paper
+    ib_port: int = 4002                       # 4002=Gateway paper on
+                                              # host/bare metal; compose
+                                              # overrides gnzsnz sibling
+                                              # container access to 4004
     ib_client_id: int = 11                    # set per-asset below
     ib_account: str = ""                      # optional paper acct id
     ib_market_data_type: int = 3              # 3=delayed,4=delayed-frozen,

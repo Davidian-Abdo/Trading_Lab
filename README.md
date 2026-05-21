@@ -132,7 +132,11 @@ Forex + Stocks (Interactive Brokers paper — data only): open a
 free IBKR account and enable the paper account. Install IB
 Gateway (lighter than TWS) and log it into the paper account.
 In Gateway: Configure → API → Settings → enable socket clients, note
-the port (4002 for Gateway paper), and trust the workers' client IDs.
+the paper port. For a host or bare-metal Gateway this is normally
+4002. In the bundled gnzsnz Docker layout, the lab container must use
+`ib-gateway:4004` because the image exposes the paper API to sibling
+containers through socat on port 4004, while the host still probes it
+as `127.0.0.1:4002`.
 For unattended 24/7 operation use IBC to auto-launch and
 auto-login Gateway (it logs out daily otherwise). The lab connects
 read-only and never places orders.
