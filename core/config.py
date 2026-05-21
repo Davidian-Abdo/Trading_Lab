@@ -54,7 +54,7 @@ class WorkerConfig:
 
     # ---- crypto: Kraken (public data; keys OPTIONAL) ----------------
     crypto_exchange: str = "kraken"           # hardwired to Kraken
-    kraken_key: str = ""                      # optional (raises rate limits)
+    kraken_key: str = ""                       # optional (raises rate limits)
     kraken_secret: str = ""                   # optional
 
     # ---- forex + stocks: Interactive Brokers PAPER ------------------

@@ -1,5 +1,5 @@
 """
-strategies/indicator_macd_rsi.py  -- EMA / MACD / RSI CONFIRMATION
+strategies/indicator_rsi.py  -- EMA / MACD / RSI CONFIRMATION
 
 Ported from the previous MetaTrader5 bot's `check_signals()`.
 
@@ -25,7 +25,8 @@ comparable, and not every feed supports a 3m granularity). The
 multi-timeframe vote is therefore out of scope for this single-feed lab
 and is intentionally dropped; the single-timeframe signal logic is
 preserved 1:1. Timeframe is set to "5m" because it is the one value all
-three lab feeds (Binance / OANDA / Alpaca) map cleanly.
+three lab feeds (Kraken spot / IBKR paper forex / IBKR paper stocks)
+map cleanly.
 """
 
 from core.strategy import Strategy

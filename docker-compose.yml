@@ -32,9 +32,12 @@ services:
     restart: always
     env_file: ./.env.shared
     environment:
-      # Required: your IBKR PAPER login
-      TWS_USERID: ${TWS_USERID}
-      TWS_PASSWORD: ${TWS_PASSWORD}
+      # Required: your IBKR PAPER login. The gnzsnz image expects
+      # TWS_USERID / TWS_PASSWORD; the lab's .env.shared uses the
+      # IB_USERID / IB_PASSWORD naming consistent with the IB_* prefix
+      # used everywhere else, so we remap here.
+      TWS_USERID: ${IB_USERID}
+      TWS_PASSWORD: ${IB_PASSWORD}
       # Always paper for this lab. Switching to "live" requires real
       # 2FA setup and is intentionally out of scope.
       TRADING_MODE: paper

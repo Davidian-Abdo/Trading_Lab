@@ -302,7 +302,8 @@ Fallback without GitHub, from your laptop:
   ssh lab@VPS_IP
   cd /home/lab/trading-lab
   cp .env.shared.example .env.shared
-  nano .env.shared           # paste OANDA / Alpaca / Telegram / heartbeat
+  nano .env.shared           # paste Kraken (optional) / IBKR paper /
+                             # Telegram / heartbeat
                              # set DASHBOARD_PASSWORD to something strong
 
 # 5.6 Bring the lab up
