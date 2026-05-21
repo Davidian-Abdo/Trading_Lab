@@ -58,9 +58,20 @@ services:
       TWOFA_TIMEOUT_ACTION: exit
       RELOGIN_AFTER_TWOFA_TIMEOUT: "no"
       TIME_ZONE: Etc/UTC
+      # API trust list (written into jts.ini at boot). Gateway's API
+      # accepts TCP from anywhere, but it CLOSES the API session right
+      # after the handshake unless the source IP appears here. The
+      # default is "127.0.0.1" only, which kills connections from the
+      # `lab` container (which talks to us across the compose bridge
+      # network, not loopback). The static IP below is pinned via the
+      # `labnet` network so this list stays valid across restarts.
+      TRUSTED_IPS: "127.0.0.1,172.28.0.10"
       # VNC password (VNC_SERVER_PASSWORD) comes through env_file. If
       # left blank in .env.shared the gnzsnz image just skips starting
       # the VNC server. Bound to loopback in the ports section.
+    networks:
+      labnet:
+        ipv4_address: 172.28.0.11
     ports:
       # API: paper port only, loopback on the host. The `lab` container
       # reaches it on the compose network, not via the host port — the
@@ -135,6 +146,11 @@ services:
     # change this to "8501:8501", and firewall the port to your IP.
     ports:
       - "127.0.0.1:8501:8501"
+    networks:
+      labnet:
+        # Pinned IP so it appears in Gateway's TRUSTED_IPS list above.
+        # Both addresses sit inside the `labnet` /24 below.
+        ipv4_address: 172.28.0.10
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8501/_stcore/health"]
       interval: 30s
@@ -142,3 +158,15 @@ services:
       start_period: 30s
       retries: 3
     logging: *default-logging
+
+
+# Dedicated bridge network with a pinned subnet so the lab and gateway
+# containers get STABLE IPs across restarts. Without this, docker compose
+# assigns IPs from its default pool, which would invalidate the
+# TRUSTED_IPS list every time the project network was recreated.
+networks:
+  labnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
